@@ -51,8 +51,9 @@ from .executor import Executor
 from .executor_registry import build_driver_registry
 from .extractors import ExtractorPool
 from .jev_client import JevClient
-from .perception import select_capture
+from .perception import ScreenSource, select_capture
 from .states import SCHEMAS_BY_TARGET
+from .wiring import configured_pools, configured_sources
 
 
 class StepResult:
@@ -113,13 +114,27 @@ class Driver:
 
     def __init__(self, *, settings=None, budget=None, audit=None,
                  vocabulary=DEFAULT_VOCABULARY, pool=None, jev=None,
-                 executor=None, sources=(), screen=None, pools=None):
+                 executor=None, sources=None, screen=None, pools=None):
         self.settings = settings or load_settings()
         self.budget = budget or Budget(self.settings.run_ceiling_usd,
                                        step_ceiling_usd=self.settings.step_ceiling_usd)
         self.audit = audit or AuditLog(
             self.settings.audit_path or default_audit_path())
         self.vocabulary = vocabulary
+
+        # ``None`` means "use what the settings declare"; ``()`` means
+        # "explicitly none". Both spellings are load-bearing: a library caller
+        # that wants a driver which cannot observe anything should not have to
+        # unset five settings to get one, and a caller that declares a CLI
+        # command should not have to re-derive the source in Python.
+        if sources is None or screen is None or pools is None:
+            declared_sources = configured_sources(self.settings)
+            declared_pools = configured_pools(self.settings,
+                                              budget=self.budget,
+                                              audit=self.audit)
+        else:
+            declared_sources, declared_pools = [], {}
+
         #: The fallback pool, used for a target whose class is undeclared.
         self.pool = pool or ExtractorPool([])
         #: Pools keyed by declared target class. This is where "three of the
@@ -127,8 +142,10 @@ class Driver:
         #: extraction side: a class is only ever handed the pool that
         #: declared it, so a vision pool is not a candidate for a ``dom``
         #: target rather than merely being discouraged.
-        self.pools = dict(pools or {})
-        self.sources = list(sources)
+        self.pools = {**declared_pools, **(pools or {})}
+        self.sources = list(declared_sources if sources is None else sources)
+        if screen is None:
+            screen = ScreenSource() if self.settings.screen_enabled else None
         self.screen = screen
 
         self.jev = jev or JevClient(self.settings, budget=self.budget,
