@@ -84,25 +84,43 @@ CLI_SCHEMA = Schema(
     ],
 )
 
-#: Schemas by target class, so a caller picks one and does not have to know
-#: which module declared it.
-SCHEMAS_BY_TARGET = {
-    "gui": SCREEN_SCHEMA,
-    "screen": SCREEN_SCHEMA,
-    "cli": CLI_SCHEMA,
-    "dom": SCREEN_SCHEMA,
-    "mcp": CLI_SCHEMA,
-}
+#: What a fetched document can honestly supply. Separate from
+#: :data:`SCREEN_SCHEMA` because a document genuinely cannot report the
+#: foreground application's name or whether a modal dialog is up -- and
+#: reusing the screen schema for it would mean asking a reader to invent two
+#: of its three required fields, which is the failure this project is built
+#: against. A DOM target that cannot read a title reports a shortfall, which
+#: is the truth, rather than a confident guess.
+DOM_SCHEMA = Schema(
+    "driver-core-dom", "1.0.0",
+    [
+        Field("window_title", "string", presence=REQUIRED, provenance=CASED,
+              description="The document's <title>."),
+        Field("visible_text", "string", presence=OPTIONAL, provenance=CASED,
+              description="Readable text of the document body.",
+              provenance_note="Casefolded and stripped; long free text is the "
+                              "field most likely to produce a genuine "
+                              "disagreement, and that is reported rather "
+                              "than resolved."),
+    ],
+)
 
-#: Which schema serves each declared target class. Declared next to the
-#: schemas rather than guessed in the driver, because "a DOM target and a GUI
-#: target extract the same fields" is a real statement about the product and
-#: belongs in the module that owns the declarations.
-SCHEMA_BY_CLASS = {
-    CLI: CLI_SCHEMA,
-    MCP: CLI_SCHEMA,
-    DOM: SCREEN_SCHEMA,
-    GUI: SCREEN_SCHEMA,
+#: The names the service accepts on the wire, each bound to a target class
+#: **and** its schema in one place. This is the only map over these names: a
+#: second one is what let a request arrive with a schema and a class that
+#: disagreed, and an undeclared class permits any source to answer -- which
+#: quietly reopens the vision tier.
+#:
+#: The table is the whole set: there is deliberately no default for an absent
+#: name, because a default would have to be one of the four declared classes
+#: and whichever it was would silently observe a different machine than the
+#: caller asked for. So the service asks instead.
+WIRE_TARGETS = {
+    "cli": (CLI, CLI_SCHEMA),
+    "mcp": (MCP, CLI_SCHEMA),
+    "dom": (DOM, DOM_SCHEMA),
+    "gui": (GUI, SCREEN_SCHEMA),
+    "screen": (GUI, SCREEN_SCHEMA),
 }
 
 #: Which target classes are answerable without a vision extractor.
