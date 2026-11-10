@@ -238,5 +238,100 @@ class AuditChainTests(unittest.TestCase):
         self.assertEqual(a["seq"], b["seq"])
 
 
+class StepScopeTests(unittest.TestCase):
+    """``step_ceiling_usd`` bounds a step, not each of its dispatches.
+
+    The defect these cover: checked one call at a time, a step that made ten
+    dispatches was bounded by ten times the declared cap, so the number in the
+    configuration was not the number enforced.
+    """
+
+    def test_a_step_cannot_spend_its_ceiling_more_than_once(self):
+        budget = Budget(10.0, step_ceiling_usd=0.05)
+        with budget.step_scope("s1"):
+            budget.reserve(0.03, label="rung-1").settle(0.03)
+            with self.assertRaises(BudgetRefused) as ctx:
+                budget.reserve(0.03, label="rung-2")
+        self.assertEqual(ctx.exception.ceiling, 0.05)
+        self.assertEqual(budget.spent, 0.03)
+
+    def test_the_refusal_names_the_step_and_the_call(self):
+        budget = Budget(10.0, step_ceiling_usd=0.05)
+        with budget.step_scope("step-7"):
+            budget.reserve(0.04, label="rung-1")
+            with self.assertRaises(BudgetRefused) as ctx:
+                budget.reserve(0.04, label="rung-2")
+        message = str(ctx.exception)
+        self.assertIn("step-7", message)
+        self.assertIn("rung-2", message)
+
+    def test_an_open_reservation_counts_against_the_step(self):
+        budget = Budget(10.0, step_ceiling_usd=0.05)
+        with budget.step_scope("s1"):
+            leaked = budget.reserve(0.04, label="held")
+            with self.assertRaises(BudgetRefused):
+                budget.reserve(0.04, label="second")
+            leaked.cancel()
+            budget.reserve(0.04, label="after-cancel").settle(0.04)
+
+    def test_each_step_gets_its_own_ceiling(self):
+        budget = Budget(10.0, step_ceiling_usd=0.05)
+        for step in ("s1", "s2"):
+            with budget.step_scope(step):
+                budget.reserve(0.05).settle(0.05)
+        self.assertAlmostEqual(budget.spent, 0.10)
+
+    def test_outside_a_scope_the_call_is_the_step(self):
+        budget = Budget(10.0, step_ceiling_usd=0.05)
+        budget.reserve(0.05).settle(0.05)
+        budget.reserve(0.05).settle(0.05)
+        with self.assertRaises(BudgetRefused):
+            budget.reserve(0.051)
+
+    def test_the_run_ceiling_still_bites_inside_a_scope(self):
+        # A step ceiling wide enough not to be the binding one, so what the
+        # refusal reports is the run ceiling the scope must not weaken.
+        budget = Budget(0.06, step_ceiling_usd=0.20)
+        with budget.step_scope("s1"):
+            budget.reserve(0.04).settle(0.04)
+            with self.assertRaises(BudgetRefused) as ctx:
+                budget.reserve(0.04)
+        self.assertAlmostEqual(ctx.exception.ceiling, 0.02)
+        self.assertEqual(budget.spent, 0.04)
+
+    def test_a_scope_leaves_nothing_behind_after_an_exception(self):
+        budget = Budget(10.0, step_ceiling_usd=0.05)
+        with self.assertRaises(RuntimeError):
+            with budget.step_scope("s1"):
+                budget.reserve(0.04, label="held")
+                raise RuntimeError("step blew up")
+        # The next step is judged on its own exposure, not the failed one's.
+        with budget.step_scope("s2"):
+            budget.reserve(0.04).settle(0.04)
+        self.assertAlmostEqual(budget.spent, 0.04)
+
+    def test_a_scope_is_thread_local(self):
+        budget = Budget(10.0, step_ceiling_usd=0.05)
+        entered, release = threading.Event(), threading.Event()
+        seen = {}
+
+        def worker():
+            with budget.step_scope("slow"):
+                budget.reserve(0.05).settle(0.05)
+                entered.set()
+                release.wait(5)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        self.assertTrue(entered.wait(5))
+        # This thread is in no scope, so it is not charged for the other one.
+        seen["ok"] = budget.reserve(0.05).settle(0.05)
+        release.set()
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertAlmostEqual(budget.spent, 0.10)
+        self.assertAlmostEqual(seen["ok"], 0.05)
+
+
 if __name__ == "__main__":
     unittest.main()
