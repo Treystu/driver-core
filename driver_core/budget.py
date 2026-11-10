@@ -24,6 +24,7 @@ record -- has one owner, :meth:`Budget.exchange`, so it cannot drift between
 the call sites that spend money.
 """
 import threading
+from contextlib import contextmanager
 
 from .errors import BudgetRefused
 
@@ -56,6 +57,11 @@ class Budget:
         #: balance forever and nothing reports it, which is the precise
         #: failure ``open_reservations`` exists to make visible.
         self._live = []
+        #: The step scopes open on *this* thread, innermost last. A scope is
+        #: what makes ``step_ceiling_usd`` a per-step number: see
+        #: :meth:`step_scope`. Thread-local because one budget is shared by
+        #: concurrent workers, and a step belongs to exactly one of them.
+        self._scopes = threading.local()
 
     # -- queries ---------------------------------------------------------
 
@@ -103,14 +109,66 @@ class Budget:
         if estimate < 0:
             raise ValueError("estimated_usd must be >= 0")
         with self._lock:
-            if estimate > self._step_ceiling:
-                raise BudgetRefused(estimate, self._step_ceiling, label)
+            # The step ceiling judges the *step*, not the call. Outside a
+            # step scope the two are the same thing -- one reservation, one
+            # dispatch -- so a bare ``reserve`` keeps the old meaning.
+            tally = self._current_tally()
+            if tally is None:
+                if estimate > self._step_ceiling:
+                    raise BudgetRefused(estimate, self._step_ceiling, label)
+            else:
+                projected = tally.committed + tally.outstanding + estimate
+                if projected > self._step_ceiling:
+                    raise BudgetRefused(projected, self._step_ceiling,
+                                        _step_label(tally.key, label))
             if estimate > self._ceiling - self._spent - self._reserved:
                 raise BudgetRefused(estimate, self._remaining_locked(), label)
             self._reserved += estimate
             reservation = Reservation(self, estimate, label)
+            if tally is not None:
+                tally.outstanding += estimate
+                reservation._step = tally
             self._live.append(reservation)
             return reservation
+
+    # -- step scoping ----------------------------------------------------
+
+    def _current_tally(self):
+        stack = getattr(self._scopes, "stack", None)
+        return stack[-1] if stack else None
+
+    @contextmanager
+    def step_scope(self, key=""):
+        """Attribute every reservation taken inside this block to one step.
+
+        ``step_ceiling_usd`` is documented as a **per-step** ceiling, and a
+        step dispatches more than once: the locate ladder retries rungs, and
+        an envelope may be re-asked. Checked one call at a time, the ceiling
+        bounded a single *call*, so a step that made N dispatches was bounded
+        by N times the declared cap -- the configured number was not the
+        enforced number.
+
+        Inside this scope the reservations of one step are accumulated and
+        the running total is what the ceiling judges, so a step cannot spend
+        its cap twice. A settled reservation counts at what it actually
+        charged; an open one counts at its reservation, because the step may
+        still have to pay that much. Scopes nest, and only the innermost one
+        is charged, so a sub-step cannot borrow its parent's headroom
+        silently -- the outer scope still sees the money leave the budget
+        through its own settlement records.
+
+        An empty ``key`` is allowed for callers that have no id yet, and
+        names itself in the refusal.
+        """
+        tally = _StepTally(key)
+        stack = getattr(self._scopes, "stack", None)
+        if stack is None:
+            stack = self._scopes.stack = []
+        stack.append(tally)
+        try:
+            yield tally
+        finally:
+            stack.pop()
 
     def _remaining_locked(self):
         return max(0.0, self._ceiling - self._spent - self._reserved)
@@ -125,6 +183,10 @@ class Budget:
             reservation._finish(amount, source)
             self._reserved -= reservation.estimate
             self._spent += amount
+            tally = reservation._step
+            if tally is not None:
+                tally.outstanding -= reservation.estimate
+                tally.committed += amount
             if reservation in self._live:
                 self._live.remove(reservation)
             self._entries.append({
@@ -197,11 +259,33 @@ SETTLED = "settled"
 CANCELLED = "cancelled"
 
 
+class _StepTally:
+    """What one step has committed and what it still has outstanding.
+
+    ``committed`` is dollars already settled or cancelled; ``outstanding`` is
+    the reservations the step still holds. A step's exposure is the sum, and
+    that is what :attr:`Budget.step_scope` judges against the ceiling.
+    """
+
+    __slots__ = ("key", "committed", "outstanding")
+
+    def __init__(self, key=""):
+        self.key = key
+        self.committed = 0.0
+        self.outstanding = 0.0
+
+
+def _step_label(key, label):
+    """Name the step and the call in one refusal, so both are actionable."""
+    parts = [part for part in (f"step {key}" if key else "", label) if part]
+    return " / ".join(parts)
+
+
 class Reservation:
     """A held amount. Settles or cancels exactly once."""
 
     __slots__ = ("_budget", "estimate", "label", "state", "charged",
-                 "usage_source")
+                 "usage_source", "_step")
 
     def __init__(self, budget, estimate, label):
         self._budget = budget
@@ -210,6 +294,9 @@ class Reservation:
         self.state = RESERVED
         self.charged = 0.0
         self.usage_source = None
+        #: The step this reservation was taken under, or ``None`` outside a
+        #: :meth:`Budget.step_scope`. Settlement reports back to it.
+        self._step = None
 
     def settle(self, actual_usd=None, source=ACTUAL):
         """Charge the call.
