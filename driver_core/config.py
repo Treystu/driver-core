@@ -337,7 +337,13 @@ class Settings:
     jev_guardrails: bool = False
     #: The ladder, keyed by consequence class. Validated on construction:
     #: every rung must clear the observed jitter band by its width.
-    confidence_ladder: Mapping = CONFIDENCE_LADDER
+    #: ``default_factory`` rather than a bare default: the ladder is a
+    #: ``MappingProxyType``, which 3.11's ``dataclasses`` refuses as a
+    #: field default (unhashable, so it reads as mutable) while 3.12+
+    #: accepts it. A bare default therefore made the package
+    #: **unimportable** on 3.11 -- see issue #30.
+    confidence_ladder: Mapping = field(
+        default_factory=lambda: CONFIDENCE_LADDER)
     extractor_pool: tuple = ()
     step_ceiling_usd: float = DEFAULT_STEP_CEILING_USD
     run_ceiling_usd: float = DEFAULT_RUN_CEILING_USD
