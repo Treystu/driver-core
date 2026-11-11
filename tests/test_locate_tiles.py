@@ -173,7 +173,11 @@ class TileLocateTests(unittest.TestCase):
         cap = estimate_call_cost(IMAGE_REQUEST_TOKEN_BOUND,
                                  price_per_million=JEV_INPUT_PRICE_PER_MILLION)
         # Four calls settle before remaining capacity cannot reserve another.
-        self.slot.budget = Budget(cap + 4*100*.042/1e6 - 1e-10,
+        # The shortfall is one millionth of a dollar: large enough to be
+        # representable on the budget's accounting grid (it compares at the
+        # 9 places it reports in, so a 1e-10 shortfall would round away and
+        # the fifth call would rightly be admitted).
+        self.slot.budget = Budget(cap + 4*100*.042/1e6 - 1e-6,
                                   step_ceiling_usd=cap)
         result = self.run_locate()
         self.assertFalse(result.located)

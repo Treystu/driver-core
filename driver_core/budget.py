@@ -32,6 +32,17 @@ ACTUAL = "actual"
 ESTIMATED = "estimated"
 UNAVAILABLE = "unavailable"
 
+#: The precision the budget reports in: :meth:`Budget.snapshot` and every
+#: ledger entry round to this many places, so the pre-flight comparison does
+#: too. Comparing raw floats let accumulated representation error refuse a
+#: charge that fitted exactly -- a ceiling of N x cost admitted only N-1.
+ACCOUNTING_PLACES = 9
+
+
+def _at_precision(value):
+    """``value`` as the budget reports it, so comparisons match the reports."""
+    return round(float(value), ACCOUNTING_PLACES)
+
 
 class Budget:
     """A dollar ceiling with reserve-then-settle accounting.
@@ -46,7 +57,16 @@ class Budget:
         if ceiling_usd <= 0:
             raise ValueError("ceiling_usd must be positive")
         self._ceiling = float(ceiling_usd)
-        self._step_ceiling = float(step_ceiling_usd or ceiling_usd)
+        # ``is None``, not ``or``: a step ceiling of 0.0 is a real request
+        # ("no step may spend") and must not be widened to the run ceiling.
+        # It is refused below for the same reason ``ceiling_usd <= 0`` is:
+        # a ceiling that can never admit a charge is a configuration error,
+        # and inheriting it silently would bound nothing.
+        if step_ceiling_usd is None:
+            step_ceiling_usd = ceiling_usd
+        self._step_ceiling = float(step_ceiling_usd)
+        if self._step_ceiling <= 0:
+            raise ValueError("step_ceiling_usd must be positive")
         self._lock = threading.RLock()
         self._spent = 0.0
         self._reserved = 0.0
@@ -76,7 +96,8 @@ class Budget:
     @property
     def remaining(self):
         with self._lock:
-            return max(0.0, self._ceiling - self._spent - self._reserved)
+            return _at_precision(max(0.0, self._ceiling - self._spent
+                                     - self._reserved))
 
     def snapshot(self):
         with self._lock:
@@ -103,17 +124,24 @@ class Budget:
         if estimate < 0:
             raise ValueError("estimated_usd must be >= 0")
         with self._lock:
-            if estimate > self._step_ceiling:
+            # Compare at the precision this budget reports in. Accumulated
+            # float representation error in ``_spent`` otherwise makes the
+            # remaining balance a hair smaller than a charge that fits
+            # exactly, so a ceiling of N x cost admitted N-1 of them.
+            if _at_precision(estimate) > _at_precision(self._step_ceiling):
                 raise BudgetRefused(estimate, self._step_ceiling, label)
-            if estimate > self._ceiling - self._spent - self._reserved:
-                raise BudgetRefused(estimate, self._remaining_locked(), label)
+            if (_at_precision(estimate)
+                    > _at_precision(self._ceiling - self._spent - self._reserved)):
+                raise BudgetRefused(estimate, self._remaining_locked(), label,
+                                    limit="remaining")
             self._reserved += estimate
             reservation = Reservation(self, estimate, label)
             self._live.append(reservation)
             return reservation
 
     def _remaining_locked(self):
-        return max(0.0, self._ceiling - self._spent - self._reserved)
+        return _at_precision(max(0.0, self._ceiling - self._spent
+                                 - self._reserved))
 
     def open_reservations(self):
         with self._lock:
