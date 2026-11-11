@@ -236,6 +236,12 @@ class Driver:
         # 2 + 3. extract and tally
         pool = self._pool_for(capture)
         votes = pool.run(capture, schema)
+        # A ceiling that refused a slot is a spend stop. Without this the
+        # refusal reaches the tally as an error vote and the step reports an
+        # extraction shortfall, which blames the capture for a budget decision.
+        if pool.refused():
+            return self._stop(step_id, "extract", "budget_refused",
+                              pool.refused(), capture=capture)
         agreement = tally(votes, schema, quorum=self.settings.quorum,
                           min_agreement=self.settings.min_agreement)
         receipt = agreement.receipt(schema.identity(), step_id)

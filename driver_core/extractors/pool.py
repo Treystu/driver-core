@@ -5,6 +5,7 @@ every extractor asked separately, one vote per slot out -- and the vision
 pool's builder, so no caller assembles its own billed clients.
 """
 from ..consensus import Vote
+from ..errors import BudgetRefused
 from ..perception import VISION_CLASS
 from .vision import VisionExtractor
 
@@ -27,6 +28,10 @@ class ExtractorPool:
     def __init__(self, extractors, *, serves=()):
         self.extractors = list(extractors)
         self.serves = tuple(serves)
+        #: Refusals the ceiling made during the last :meth:`run`, in slot
+        #: order. A refusal is a spend stop, not a shortfall: the driver reads
+        #: this so the step stops for the reason that actually stopped it.
+        self._refusals = []
 
     @property
     def size(self):
@@ -93,15 +98,34 @@ class ExtractorPool:
             return None
         return min(judgments, key=lambda judgment: judgment.p)
 
+    def refused(self):
+        """Why the ceiling refused a slot in the last run, or ``None``.
+
+        A budget refusal is a control decision, not a slot failure: the
+        per-slot isolation below exists for a model or a wire fault, and
+        swallowing the ceiling's refusal into an error vote reported a spend
+        stop as a capture-quality problem. The mark is separate from the vote
+        so the tally still gets one entry per slot, and the driver stops for
+        the real reason.
+        """
+        return self._refusals[0] if self._refusals else None
+
     def run(self, capture, schema):
         """Return one Vote per extractor. Never raises for a slot failure."""
         votes = []
+        self._refusals = []
         for extractor in self.extractors:
             slot = getattr(extractor, "slot", f"slot-{len(votes)}")
             try:
                 result = (extractor.extract(capture, schema)
                           if extractor.uses_capture
                           else extractor.extract(schema))
+            except BudgetRefused as exc:
+                # Named before the generic clause: the ceiling's refusal is a
+                # control signal and must not read as an extractor fault.
+                self._refusals.append(str(exc))
+                votes.append(Vote.error(slot, f"budget refused: {exc}"))
+                continue
             except Exception as exc:  # isolation is the point
                 votes.append(Vote.error(slot, f"extractor raised: {exc}"))
                 continue
