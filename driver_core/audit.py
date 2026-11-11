@@ -191,21 +191,46 @@ class AuditLog:
             os.fsync(handle.fileno())
 
     def read_all(self):
-        """Every record, in order."""
+        """Every record, in order.
+
+        A line that does not parse raises :class:`AuditError` naming the line,
+        the same way :meth:`_tail` does on construction. A partially written
+        record is the ordinary shape of an interrupted append, and a caller
+        cannot be expected to catch ``json.JSONDecodeError`` from an audit.
+        """
         if not self.path or not os.path.exists(self.path):
             return []
         out = []
         with open(self.path, encoding="utf-8") as handle:
-            for line in handle:
+            for lineno, line in enumerate(handle, 1):
                 line = line.strip()
-                if line:
+                if not line:
+                    continue
+                try:
                     out.append(json.loads(line))
+                except json.JSONDecodeError as exc:
+                    error = AuditError(
+                        f"{self.path}:{lineno} is not valid JSON ({exc}); the "
+                        f"chain cannot be trusted past this point")
+                    # 0-based, so the caller can report the failing record.
+                    error.index = lineno - 1
+                    raise error from None
         return out
 
     def verify(self):
-        """Re-hash the whole chain. Returns a verdict, never raises on drift."""
+        """Re-hash the whole chain. Returns a verdict, never raises on drift.
+
+        "Never raises on drift" includes a log that no longer parses at all:
+        damage to the file is the case this method exists to report, so an
+        unreadable record becomes a failed verdict rather than an exception
+        escaping past a caller's ``if log.verify():``.
+        """
+        try:
+            records = self.read_all()
+        except AuditError as exc:
+            return ChainVerdict(False, getattr(exc, "index", 0), str(exc))
         previous = GENESIS
-        for index, record in enumerate(self.read_all()):
+        for index, record in enumerate(records):
             if record.get("seq") != index:
                 return ChainVerdict(False, index,
                                     f"record {index} has seq "
@@ -220,7 +245,10 @@ class AuditLog:
                 return ChainVerdict(False, index,
                                     f"record {index} has been altered")
             previous = record["hash"]
-        return ChainVerdict(True, len(self.read_all()), "chain verified")
+        # ``records`` is read once: re-reading the file here could count a
+        # record appended after the pass and report a longer verified chain
+        # than was actually verified.
+        return ChainVerdict(True, len(records), "chain verified")
 
 
 class AuditError(Exception):
