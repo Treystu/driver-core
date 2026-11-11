@@ -28,6 +28,8 @@ import hashlib
 import json
 import os
 import pathlib
+import re
+import shutil
 import subprocess
 import sys
 
@@ -78,26 +80,66 @@ def questions():
     }
 
 
+class CollectionError(RuntimeError):
+    """A check could not be resolved, so a state recording it would lie."""
+
+
+#: Run-to-run noise in a check's output. The suite prints how long it took, so
+#: without this two collections of the same evidence would hash differently and
+#: no reading could be compared with the next one.
+_ELAPSED = re.compile(r"\bin \d+(?:\.\d+)?s\b")
+
+
+def normalise(text):
+    """Strip the run-to-run noise from a check's output."""
+    return _ELAPSED.sub("in <elapsed>", (text or "").replace("\r\n", "\n"))
+
+
+def resolve_interpreter(name):
+    """An absolute path to a real interpreter, or a loud refusal.
+
+    Recording "command not found" as a check's result is how a state came to
+    describe a thin audit as though it were a real one: the reading then rates
+    the hole instead of the repository. Resolution happens before anything
+    runs, so a missing interpreter stops the collection rather than becoming an
+    entry inside it.
+    """
+    candidate = str(name)
+    found = shutil.which(candidate)
+    if found is None:
+        raise CollectionError(
+            f"the interpreter {candidate!r} does not resolve on this surface "
+            f"(PATH lookup found nothing); pass an absolute path to a real "
+            f"install - a state that records an unresolvable check is not "
+            f"evidence")
+    return found
+
+
 def tail(text, limit=TAIL_LINES):
-    """The last ``limit`` non-blank lines of ``text``."""
-    lines = [line for line in (text or "").splitlines() if line.strip()]
+    """The last ``limit`` non-blank lines of ``text``, with noise removed."""
+    lines = [line for line in normalise(text).splitlines() if line.strip()]
     return "\n".join(lines[-limit:])
 
 
 def run_check(command, *, cwd, timeout=1800):
     """Run one check and record what it actually did.
 
-    A command that cannot be started is recorded as such -- ``returncode``
-    ``None`` and the reason in the tail -- because a missing interpreter is a
-    fact about the evidence, not a reason to stop collecting it.
+    A command that cannot be started stops the collection: a state that
+    records a missing command beside real results is a state that reads as a
+    completed audit, which is the failure this module exists to prevent. A
+    timeout is different - the command did start and did not finish - so it is
+    recorded as a ``None`` return code with the reason, which is a fact about
+    the evidence rather than a missing input.
     """
     argv = [str(part) for part in command]
     try:
         finished = subprocess.run(argv, cwd=str(cwd), capture_output=True,
                                   text=True, timeout=timeout)
-    except FileNotFoundError:
-        return {"command": " ".join(argv), "returncode": None,
-                "tail": "command not found on this surface"}
+    except FileNotFoundError as exc:
+        raise CollectionError(
+            f"the check {' '.join(argv)!r} could not be started: {exc}. That "
+            f"is a missing input, not a result, so the collection stops "
+            f"rather than recording it as evidence") from exc
     except subprocess.TimeoutExpired:
         return {"command": " ".join(argv), "returncode": None,
                 "tail": f"timed out after {timeout}s"}
@@ -139,9 +181,11 @@ def collect(repo_root, interpreters, *, timeout=1800):
     mixed one interpreter's toolchain with other interpreters' batteries.
     """
     root = pathlib.Path(repo_root)
-    order = list(interpreters)
-    if sys.executable not in order:
-        order.append(sys.executable)
+    order = []
+    for interpreter in list(interpreters) + [sys.executable]:
+        resolved = resolve_interpreter(interpreter)
+        if resolved not in order:
+            order.append(resolved)
     checks = [run_check(["git", "rev-parse", "--short", "HEAD"], cwd=root,
                         timeout=timeout)]
     for interpreter in order:
@@ -244,7 +288,10 @@ def main(argv=None):
     interpreters = args.interpreter or [sys.executable]
     root = pathlib.Path(args.root)
 
-    checks = collect(root, interpreters, timeout=args.timeout)
+    try:
+        checks = collect(root, interpreters, timeout=args.timeout)
+    except CollectionError as exc:
+        raise SystemExit(str(exc)) from exc
     head = next((check["tail"].strip().splitlines()[-1]
                  for check in checks
                  if check["command"].startswith("git rev-parse")), "")

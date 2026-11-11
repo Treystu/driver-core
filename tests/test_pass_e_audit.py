@@ -33,6 +33,44 @@ class TailTests(unittest.TestCase):
         self.assertEqual(pass_e.tail("", limit=3), "")
 
 
+class ResolveTests(unittest.TestCase):
+    def test_a_real_interpreter_resolves_to_an_absolute_path(self):
+        resolved = pass_e.resolve_interpreter("python")
+        self.assertTrue(pathlib.Path(resolved).is_absolute())
+        self.assertTrue(pathlib.Path(resolved).exists())
+
+    def test_an_unresolvable_interpreter_is_refused_by_name(self):
+        with self.assertRaises(pass_e.CollectionError) as ctx:
+            pass_e.resolve_interpreter("python-does-not-exist-99")
+        message = str(ctx.exception)
+        self.assertIn("python-does-not-exist-99", message)
+        self.assertIn("does not resolve", message)
+
+    def test_the_running_interpreter_resolves(self):
+        self.assertTrue(pathlib.Path(pass_e.resolve_interpreter(
+            sys.executable)).exists())
+
+
+class NormaliseTests(unittest.TestCase):
+    def test_elapsed_time_is_removed_so_two_runs_can_agree(self):
+        first = pass_e.normalise("Ran 723 tests in 24.081s\nOK (skipped=11)")
+        second = pass_e.normalise("Ran 723 tests in 31.500s\nOK (skipped=11)")
+        self.assertEqual(first, second)
+        self.assertIn("in <elapsed>", first)
+
+    def test_two_states_that_differ_only_in_elapsed_time_hash_the_same(self):
+        def state(elapsed):
+            return pass_e.build_state(
+                head="abc1234",
+                checks=[{"command": "python -m unittest discover",
+                         "returncode": 0,
+                         "tail": pass_e.tail(
+                             f"Ran 723 tests in {elapsed}s\n\nOK (skipped=11)")}])
+
+        self.assertEqual(pass_e.state_digest(state("24.081")),
+                         pass_e.state_digest(state("31.500")))
+
+
 class RunCheckTests(unittest.TestCase):
     def test_a_real_command_reports_its_return_code_and_output(self):
         check = pass_e.run_check([sys.executable, "-c",
@@ -41,11 +79,13 @@ class RunCheckTests(unittest.TestCase):
         self.assertEqual(check["returncode"], 3)
         self.assertIn("ok", check["tail"])
 
-    def test_a_missing_command_is_recorded_rather_than_raised(self):
-        check = pass_e.run_check(["definitely-not-a-real-command-xyz"],
-                                 cwd=ROOT, timeout=60)
-        self.assertIsNone(check["returncode"])
-        self.assertIn("not found", check["tail"])
+    def test_a_missing_command_stops_the_collection_instead_of_being_recorded(self):
+        # Recording "command not found" as a result is how a thin state came
+        # to read like a real audit. It must refuse instead.
+        with self.assertRaises(pass_e.CollectionError) as ctx:
+            pass_e.run_check(["definitely-not-a-real-command-xyz"],
+                             cwd=ROOT, timeout=60)
+        self.assertIn("definitely-not-a-real-command-xyz", str(ctx.exception))
 
 
 class StateTests(unittest.TestCase):
@@ -95,17 +135,31 @@ class StateTests(unittest.TestCase):
 class CollectTests(unittest.TestCase):
     def setUp(self):
         self.seen = []
+        self.resolved = []
         self.original = pass_e.run_check
+        self.original_resolve = pass_e.resolve_interpreter
 
         def fake_run_check(command, *, cwd, timeout=1800):
             self.seen.append(list(command))
             return {"command": " ".join(str(part) for part in command),
                     "returncode": 0, "tail": "ok"}
 
+        def fake_resolve(name):
+            self.resolved.append(str(name))
+            return str(name)
+
         pass_e.run_check = fake_run_check
+        pass_e.resolve_interpreter = fake_resolve
 
     def tearDown(self):
         pass_e.run_check = self.original
+        pass_e.resolve_interpreter = self.original_resolve
+
+    def test_every_interpreter_is_resolved_including_the_running_one(self):
+        pass_e.collect(ROOT, ["python3.11", "python3.13"])
+        self.assertIn("python3.11", self.resolved)
+        self.assertIn("python3.13", self.resolved)
+        self.assertIn(sys.executable, self.resolved)
 
     def batteries(self):
         return [command for command in self.seen
