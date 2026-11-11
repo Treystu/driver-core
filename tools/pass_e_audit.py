@@ -48,6 +48,22 @@ AXES = ("correctness", "completeness", "honesty")
 #: verdict line ("OK (skipped=11)") without pasting a whole suite log.
 TAIL_LINES = 6
 
+#: Limits that are true of every collection this lane can take, so a state
+#: always carries them unless a caller says otherwise (#62). Without them a
+#: state can list six green checks and still leave out the two facts that most
+#: change how a reading should be read: nothing has ever run in CI, and every
+#: number came from one machine.
+DEFAULT_LIMITS = (
+    "no CI has ever run on this repository: every result here is a local run",
+    "one surface only: no second machine, container, or non-author review has "
+    "reproduced these results",
+)
+
+#: What each kind of check is for. A state that lists only command lines makes
+#: the reader infer coverage from the argv; naming the purpose makes the state
+#: describe itself.
+PURPOSES = ("head", "battery", "lint", "compile")
+
 
 def questions():
     """The axis questions, anchored to artifacts rather than to claims."""
@@ -121,7 +137,7 @@ def tail(text, limit=TAIL_LINES):
     return "\n".join(lines[-limit:])
 
 
-def run_check(command, *, cwd, timeout=1800):
+def run_check(command, *, cwd, timeout=1800, purpose=None, interpreter=None):
     """Run one check and record what it actually did.
 
     A command that cannot be started stops the collection: a state that
@@ -132,6 +148,10 @@ def run_check(command, *, cwd, timeout=1800):
     the evidence rather than a missing input.
     """
     argv = [str(part) for part in command]
+    record = {}
+    if purpose is not None:
+        record["purpose"] = str(purpose)
+        record["interpreter"] = None if interpreter is None else str(interpreter)
     try:
         finished = subprocess.run(argv, cwd=str(cwd), capture_output=True,
                                   text=True, timeout=timeout)
@@ -141,25 +161,30 @@ def run_check(command, *, cwd, timeout=1800):
             f"is a missing input, not a result, so the collection stops "
             f"rather than recording it as evidence") from exc
     except subprocess.TimeoutExpired:
-        return {"command": " ".join(argv), "returncode": None,
+        return {**record, "command": " ".join(argv), "returncode": None,
                 "tail": f"timed out after {timeout}s"}
     output = (finished.stdout or "") + (finished.stderr or "")
-    return {"command": " ".join(argv), "returncode": finished.returncode,
-            "tail": tail(output)}
+    return {**record, "command": " ".join(argv),
+            "returncode": finished.returncode, "tail": tail(output)}
 
 
-def build_state(*, head, checks, limits=()):
+def build_state(*, head, checks, limits=None):
     """The artifact state: head, the checks that ran, and the declared limits.
 
     ``checks`` are sorted by command line so two runs that ran the same
     commands build byte-identical states and therefore the same digest.
+
+    ``limits`` defaults to :data:`DEFAULT_LIMITS`: a caller who passes nothing
+    still gets the standing limits, because an empty list let a state read as
+    unqualified evidence when it never was (#62).
     """
     ordered = sorted((dict(check) for check in checks),
                      key=lambda check: check.get("command", ""))
+    declared = DEFAULT_LIMITS if limits is None else limits
     return {
         "head": str(head),
         "checks": ordered,
-        "declared_limits": [str(limit) for limit in limits],
+        "declared_limits": [str(limit) for limit in declared],
     }
 
 
@@ -187,15 +212,18 @@ def collect(repo_root, interpreters, *, timeout=1800):
         if resolved not in order:
             order.append(resolved)
     checks = [run_check(["git", "rev-parse", "--short", "HEAD"], cwd=root,
-                        timeout=timeout)]
+                        timeout=timeout, purpose="head")]
     for interpreter in order:
         checks.append(run_check(
             [interpreter, "-W", "error::ResourceWarning", "-m", "unittest",
-             "discover", "-s", "tests", "-t", "."], cwd=root, timeout=timeout))
+             "discover", "-s", "tests", "-t", "."], cwd=root, timeout=timeout,
+            purpose="battery", interpreter=interpreter))
     checks.append(run_check([sys.executable, "-m", "ruff", "check",
-                             "driver_core", "tests"], cwd=root, timeout=timeout))
+                             "driver_core", "tests"], cwd=root, timeout=timeout,
+                            purpose="lint", interpreter=sys.executable))
     checks.append(run_check([sys.executable, "-m", "compileall", "-q",
-                             "driver_core"], cwd=root, timeout=timeout))
+                             "driver_core"], cwd=root, timeout=timeout,
+                            purpose="compile", interpreter=sys.executable))
     return checks
 
 
