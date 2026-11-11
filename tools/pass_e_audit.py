@@ -196,6 +196,10 @@ def parse_args(argv=None):
     parser.add_argument("--no-call", action="store_true",
                         help="collect the artifacts and print the digest; "
                              "make no calls and need no key")
+    parser.add_argument("--ask-only", default=None, metavar="PATH",
+                        help="ask over a state already collected into PATH "
+                             "(a --json-out file); collects nothing, so the "
+                             "call does not wait on a fresh battery")
     parser.add_argument("--limit", action="append", default=None,
                         help="a declared limit of this evidence, recorded in "
                              "the state; repeatable")
@@ -204,8 +208,39 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+def existing_state(path):
+    """The state recorded in a ``--json-out`` file, with its digest.
+
+    Collection is the slow half of an audit - a full battery is minutes on a
+    development machine - and asking is seconds. Separating them means a
+    reading can be taken from a state that was collected earlier, without
+    running the green bar again just to ask about it.
+    """
+    recorded = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    state = recorded.get("state")
+    if not isinstance(state, dict) or "checks" not in state:
+        raise SystemExit(f"{path} does not contain a collected state")
+    return state
+
+
 def main(argv=None):
     args = parse_args(argv)
+    if args.ask_only:
+        state = existing_state(args.ask_only)
+        digest = state_digest(state)
+        result = {"head": state.get("head"), "state_digest": digest,
+                  "state": state}
+        result.update(ask(state, load_settings(env=os.environ)))
+        text = json.dumps(result, indent=2, default=str)
+        print(text)
+        if args.json_out:
+            out = pathlib.Path(args.json_out)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(text + "\n", encoding="utf-8")
+        readings = result.get("readings") or {}
+        return 0 if all(value is not None
+                        for value in readings.values()) else 1
+
     interpreters = args.interpreter or [sys.executable]
     root = pathlib.Path(args.root)
 

@@ -131,6 +131,65 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(sum("git rev-parse" in one for one in joined), 1)
 
 
+class AskOnlyTests(unittest.TestCase):
+    def test_a_collected_state_can_be_asked_over_without_collecting_again(self):
+        import json
+        import tempfile
+
+        state = pass_e.build_state(
+            head="abc1234",
+            checks=[{"command": "git rev-parse --short HEAD",
+                     "returncode": 0, "tail": "abc1234"}],
+            limits=["no CI has ever run"])
+        digest = pass_e.state_digest(state)
+
+        class Keyed:
+            keyed = True
+            jev_api_key = "test-key"
+            jev_model = "jev-test"
+
+        class FakeResponse:
+            ok = True
+            payload = {"answers": {"correctness": {"type": "noul", "noul": 0.8},
+                                    "completeness": {"type": "noul", "noul": 0.9},
+                                    "honesty": {"type": "noul", "noul": 0.95}},
+                       "model": "jev-test"}
+
+        original_call = pass_e.transport.call_service
+        original_settings = pass_e.load_settings
+        pass_e.transport.call_service = lambda *a, **k: FakeResponse()
+        pass_e.load_settings = lambda env=None: Keyed()
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                recorded = pathlib.Path(folder) / "state.json"
+                recorded.write_text(json.dumps({"head": "abc1234",
+                                                "state": state}),
+                                    encoding="utf-8")
+                out = pathlib.Path(folder) / "reading.json"
+                code = pass_e.main(["--ask-only", str(recorded),
+                                    "--json-out", str(out)])
+                result = json.loads(out.read_text(encoding="utf-8"))
+        finally:
+            pass_e.transport.call_service = original_call
+            pass_e.load_settings = original_settings
+
+        self.assertEqual(code, 0)
+        self.assertEqual(result["state_digest"], digest)
+        self.assertAlmostEqual(result["readings"]["correctness"], 0.8)
+
+    def test_a_file_that_is_not_a_collected_state_is_refused(self):
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = pathlib.Path(folder) / "not-a-state.json"
+            path.write_text(json.dumps({"something": "else"}),
+                            encoding="utf-8")
+            with self.assertRaises(SystemExit) as ctx:
+                pass_e.existing_state(path)
+        self.assertIn("does not contain a collected state", str(ctx.exception))
+
+
 class KeyTests(unittest.TestCase):
     def test_asking_without_a_key_refuses_instead_of_inventing_a_reading(self):
         class Unkeyed:
