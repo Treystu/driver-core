@@ -392,6 +392,28 @@ class StepScopeTests(unittest.TestCase):
                 budget.reserve(0.05).settle(0.05)
         self.assertAlmostEqual(budget.spent, 0.10)
 
+    def test_a_nested_scope_cannot_buy_a_second_allowance(self):
+        # The defect: the ceiling was judged against the innermost open
+        # scope, so every nested scope started at zero and N levels of
+        # nesting admitted N times the declared cap.
+        budget = Budget(10.0, step_ceiling_usd=0.05)
+        with budget.step_scope("outer"):
+            budget.reserve(0.03, label="outer-rung").settle(0.03)
+            with budget.step_scope("inner"):
+                with self.assertRaises(BudgetRefused) as ctx:
+                    budget.reserve(0.03, label="inner-rung")
+        self.assertEqual(ctx.exception.ceiling, 0.05)
+        self.assertIn("outer", str(ctx.exception))
+        self.assertAlmostEqual(budget.spent, 0.03)
+
+    def test_a_nested_scope_still_admits_what_the_step_can_afford(self):
+        budget = Budget(10.0, step_ceiling_usd=0.05)
+        with budget.step_scope("outer"):
+            budget.reserve(0.02, label="outer-rung").settle(0.02)
+            with budget.step_scope("inner"):
+                budget.reserve(0.03, label="inner-rung").settle(0.03)
+        self.assertAlmostEqual(budget.spent, 0.05)
+
     def test_outside_a_scope_the_call_is_the_step(self):
         budget = Budget(10.0, step_ceiling_usd=0.05)
         budget.reserve(0.05).settle(0.05)
