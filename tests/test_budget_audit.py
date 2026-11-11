@@ -301,6 +301,43 @@ class AuditChainTests(unittest.TestCase):
         self.assertEqual(_canonical(record), _canonical(
             dict(reversed(list(record.items())))))
 
+    def test_a_truncated_record_returns_a_failed_verdict_rather_than_raising(self):
+        path = os.path.join(self.dir.name, "truncated.jsonl")
+        log = AuditLog(path)
+        log.append("capture", step_id="s1", source="cli")
+        log.append("capture", step_id="s2", source="cli")
+        with open(path, "rb+") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.truncate(os.path.getsize(path) - 12)
+        verdict = log.verify()
+        self.assertFalse(verdict.ok)
+        self.assertFalse(verdict)
+        self.assertIn("not valid JSON", verdict.detail)
+        self.assertEqual(verdict.records, 1)
+
+    def test_an_altered_record_is_still_reported_as_drift(self):
+        path = os.path.join(self.dir.name, "altered.jsonl")
+        log = AuditLog(path)
+        log.append("capture", step_id="s1", source="cli")
+        log.append("capture", step_id="s2", source="cli")
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read().replace('"cli"', '"forged"', 1)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        verdict = log.verify()
+        self.assertFalse(verdict.ok)
+        self.assertIn("altered", verdict.detail)
+
+    def test_a_clean_chain_verifies_without_rereading_the_file(self):
+        path = os.path.join(self.dir.name, "clean.jsonl")
+        log = AuditLog(path)
+        for index in range(3):
+            log.append("capture", step_id=f"s{index}", source="cli")
+        verdict = log.verify()
+        self.assertTrue(verdict.ok)
+        self.assertEqual(verdict.records, 3)
+        self.assertEqual(verdict.detail, "chain verified")
+
     def test_two_independent_runs_record_the_same_facts(self):
         one = MemoryAuditLog()
         one.append("capture", step_id="s1", source="cli")
