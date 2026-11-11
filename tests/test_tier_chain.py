@@ -231,6 +231,81 @@ class FallThroughTests(unittest.TestCase):
         self.assertIn("reader failed: the reader exploded", str(ctx.exception))
 
 
+class HostSourceTests(unittest.TestCase):
+    """A source this package did not write still gets consulted.
+
+    ``select_capture`` is handed "things that have a name, a ``serves`` and a
+    ``capture``", and the README offers ``Driver(sources=(...))`` as the way to
+    register your own. Iterating the declared names rather than the candidates
+    meant such a source was filtered in and then never called, while the
+    refusal reported that everything had been tried.
+    """
+
+    class _HostSource:
+        serves = (CLI,)
+
+        def __init__(self, name, answer, calls=None):
+            self.name = name
+            self._answer = answer
+            self._calls = calls if calls is not None else []
+
+        def can_serve(self, target):
+            return not target.declared or target.target_class == CLI
+
+        def capture(self, target):
+            self._calls.append(self.name)
+            if self._answer is None:
+                return Capture(self.name, target, None,
+                               detail="host source had nothing")
+            return Capture(self.name, target, self._answer,
+                           fingerprint="host-fp")
+
+    def test_a_host_named_source_is_called_and_answers(self):
+        source = self._HostSource("host-api", {"exit_code": 0})
+        capture = select_capture(Target("app", CLI), [source])
+        self.assertEqual(capture.source, "host-api")
+        self.assertEqual(capture.payload, {"exit_code": 0})
+
+    def test_a_host_source_is_tried_after_the_declared_tiers(self):
+        seen = []
+
+        def recorder(name, answer):
+            def reader(target):
+                seen.append(name)
+                return answer
+            return reader
+
+        host = self._HostSource("host-api", {"exit_code": 0}, calls=seen)
+        sources = [host, StructuredSource(CLI, recorder(CLI, None))]
+        capture = select_capture(Target("app", CLI), sources)
+        self.assertEqual(seen, [CLI, "host-api"])
+        self.assertEqual(capture.source, "host-api")
+
+    def test_a_host_source_declining_is_named_in_the_refusal(self):
+        source = self._HostSource("host-api", None)
+        with self.assertRaises(PerceptionUnavailable) as ctx:
+            select_capture(Target("app", CLI), [source])
+        self.assertIn("host-api: host source had nothing", str(ctx.exception))
+        self.assertNotIn("Tried: none", str(ctx.exception))
+
+    def test_a_declining_host_source_does_not_block_the_screen_tier(self):
+        """Pixels stay last, not unreachable, once a host source declines."""
+
+        class ScreenAndCli(self._HostSource):
+            serves = (CLI, GUI)
+
+            def can_serve(self, target):
+                return True
+
+        screen = ExplodingScreen()
+        screen.capture = lambda target=None: Capture(  # noqa: E731
+            GUI, target, "pixels")
+        host = ScreenAndCli("host-api", None)
+        capture = select_capture(Target("app", GUI), [host, screen])
+        self.assertEqual(capture.source, GUI)
+        self.assertEqual(host._calls, ["host-api"])
+
+
 class PoolSelectionTests(unittest.TestCase):
     """The extraction side of the same guarantee."""
 

@@ -97,6 +97,21 @@ def select_capture(target, sources, *, prefer=()):
             if capture.ok:
                 return capture
 
+    # A source a host supplied itself is tried after the tiers this
+    # package declares, and still before pixels. Iterating names
+    # rather than candidates meant a source whose name the declared
+    # order does not carry was filtered into ``candidates`` and then
+    # never called -- while the refusal said every source had been
+    # tried, which is the opposite of the contract above.
+    known = set(SOURCE_ORDER)
+    for source in candidates:
+        if source.name in known:
+            continue
+        capture = source.capture(target)
+        tried.append((source.name, capture.detail or "declined"))
+        if capture.ok:
+            return capture
+
     for source in candidates:
         if source.name != SCREEN_SOURCE:
             continue
