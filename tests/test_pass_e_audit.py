@@ -92,6 +92,45 @@ class StateTests(unittest.TestCase):
         int(digest, 16)
 
 
+class CollectTests(unittest.TestCase):
+    def setUp(self):
+        self.seen = []
+        self.original = pass_e.run_check
+
+        def fake_run_check(command, *, cwd, timeout=1800):
+            self.seen.append(list(command))
+            return {"command": " ".join(str(part) for part in command),
+                    "returncode": 0, "tail": "ok"}
+
+        pass_e.run_check = fake_run_check
+
+    def tearDown(self):
+        pass_e.run_check = self.original
+
+    def batteries(self):
+        return [command for command in self.seen
+                if "unittest" in command]
+
+    def test_the_running_interpreter_battery_is_always_collected(self):
+        pass_e.collect(ROOT, ["python3.11", "python3.13"])
+        interpreters = [command[0] for command in self.batteries()]
+        self.assertIn(sys.executable, interpreters)
+        self.assertEqual(interpreters.count(sys.executable), 1)
+
+    def test_passing_the_running_interpreter_does_not_duplicate_it(self):
+        pass_e.collect(ROOT, [sys.executable, "python3.11"])
+        interpreters = [command[0] for command in self.batteries()]
+        self.assertEqual(interpreters.count(sys.executable), 1)
+        self.assertEqual(len(interpreters), 2)
+
+    def test_the_state_still_carries_one_lint_and_one_compile_check(self):
+        pass_e.collect(ROOT, ["python3.11"])
+        joined = [" ".join(command) for command in self.seen]
+        self.assertEqual(sum("ruff" in one for one in joined), 1)
+        self.assertEqual(sum("compileall" in one for one in joined), 1)
+        self.assertEqual(sum("git rev-parse" in one for one in joined), 1)
+
+
 class KeyTests(unittest.TestCase):
     def test_asking_without_a_key_refuses_instead_of_inventing_a_reading(self):
         class Unkeyed:
