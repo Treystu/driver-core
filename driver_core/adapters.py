@@ -32,7 +32,7 @@ import json
 from . import osal
 from .errors import PerceptionUnavailable
 from .observation import (
-    CLI, DOM, GUI, MCP, SCREEN_SOURCE, Capture, fingerprint,
+    CLI, DOM, GUI, MCP, SCREEN_SOURCE, Capture, carries_state, fingerprint,
 )
 from .parsing import _last_reply, _tool_payload, read_document
 
@@ -140,6 +140,9 @@ class ScreenSource:
             described, why = osal.describe_screen()
             if not described:
                 return Capture(SCREEN_SOURCE, target, None, detail=why)
+            if not carries_state(described):
+                return Capture(SCREEN_SOURCE, target, None,
+                               detail="source answered with no state")
             return Capture(SCREEN_SOURCE, target, described,
                            fingerprint=fingerprint(described))
         path, detail = osal.capture_screen()
@@ -153,6 +156,9 @@ class ScreenSource:
         if payload is None:
             return Capture(SCREEN_SOURCE, target, None,
                            detail="capture produced no readable bytes")
+        if not carries_state(payload):
+            return Capture(SCREEN_SOURCE, target, None,
+                           detail="source answered with no state")
         return Capture(SCREEN_SOURCE, target, payload,
                        fingerprint=fingerprint(payload))
 

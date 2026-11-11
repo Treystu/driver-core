@@ -39,6 +39,7 @@ an audit record, because a log of screen captures is a log of everything the
 operator has looked at.
 """
 import hashlib
+from collections.abc import Mapping, Sequence, Set
 
 from .errors import PerceptionUnavailable
 
@@ -158,7 +159,12 @@ class Capture:
 
     @property
     def cost_usd(self):
-        """A capture's own cost. Zero for every structured tier."""
+        """A capture's own cost. Zero for every tier, pixels included.
+
+        Taking a screenshot is local work; what costs money is the vision
+        extractor reading it, and that spend is recorded on the extraction,
+        not on the capture.
+        """
         return 0.0
 
     def summary(self):
@@ -169,6 +175,27 @@ class Capture:
 
     def __repr__(self):
         return f"Capture({self.source!r}, ok={self.ok})"
+
+
+
+def carries_state(payload):
+    """Whether a payload is an observation rather than an empty answer.
+
+    An empty mapping, an empty sequence or a blank string is not a capture of
+    anything: ``read_document`` returns ``{}`` for a document with no static
+    text, and accepting that as ``ok`` both hid the tier that could have
+    answered and inflated the capture success rate the tier audit measures
+    (#67). A payload that is not a container is taken at its word.
+    """
+    if payload is None:
+        return False
+    if isinstance(payload, str):
+        return bool(payload.strip())
+    if isinstance(payload, (bytes, bytearray)):
+        return bool(bytes(payload).strip())
+    if isinstance(payload, (Mapping, Sequence, Set)):
+        return len(payload) > 0
+    return True
 
 
 
@@ -250,6 +277,9 @@ class StructuredSource:
                            detail=f"reader failed: {exc}")
         if payload is None:
             return Capture(self.name, target, None, detail="source had nothing")
+        if not carries_state(payload):
+            return Capture(self.name, target, None,
+                           detail="source answered with no state")
         return Capture(self.name, target, payload,
                        fingerprint=fingerprint(payload))
 
