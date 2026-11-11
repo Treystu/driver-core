@@ -104,6 +104,33 @@ class StateTests(unittest.TestCase):
         self.assertEqual(state["declared_limits"], ["no CI has ever run"])
         self.assertEqual(len(state["checks"]), 2)
 
+    def test_the_standing_limits_are_present_when_a_caller_passes_none(self):
+        # #62: an empty declared_limits let a six-check green state read as
+        # unqualified evidence, when it has never been anything but one local
+        # machine with no CI. The default is part of the state now.
+        state = pass_e.build_state(head="abc1234", checks=self.checks())
+        self.assertEqual(state["declared_limits"],
+                         list(pass_e.DEFAULT_LIMITS))
+        joined = " ".join(state["declared_limits"])
+        self.assertIn("no CI has ever run", joined)
+        self.assertIn("one surface only", joined)
+
+    def test_a_caller_can_still_declare_its_own_limits(self):
+        state = pass_e.build_state(head="abc1234", checks=self.checks(),
+                                   limits=["readings not taken: --no-call"])
+        self.assertEqual(state["declared_limits"],
+                         ["readings not taken: --no-call"])
+
+    def test_a_check_that_says_what_it_is_for_changes_the_digest(self):
+        bare = self.checks()
+        described = [dict(check, purpose="battery",
+                          interpreter="python3.13") for check in bare]
+        self.assertNotEqual(
+            pass_e.state_digest(pass_e.build_state(head="abc1234",
+                                                   checks=bare)),
+            pass_e.state_digest(pass_e.build_state(head="abc1234",
+                                                   checks=described)))
+
     def test_the_same_evidence_always_hashes_the_same(self):
         first = pass_e.build_state(head="abc1234", checks=self.checks())
         second = pass_e.build_state(head="abc1234",
@@ -135,12 +162,16 @@ class StateTests(unittest.TestCase):
 class CollectTests(unittest.TestCase):
     def setUp(self):
         self.seen = []
+        self.made = []
         self.resolved = []
         self.original = pass_e.run_check
         self.original_resolve = pass_e.resolve_interpreter
 
-        def fake_run_check(command, *, cwd, timeout=1800):
+        def fake_run_check(command, *, cwd, timeout=1800, purpose=None,
+                           interpreter=None):
             self.seen.append(list(command))
+            self.made.append({"command": " ".join(str(part) for part in command),
+                              "purpose": purpose, "interpreter": interpreter})
             return {"command": " ".join(str(part) for part in command),
                     "returncode": 0, "tail": "ok"}
 
@@ -176,6 +207,23 @@ class CollectTests(unittest.TestCase):
         interpreters = [command[0] for command in self.batteries()]
         self.assertEqual(interpreters.count(sys.executable), 1)
         self.assertEqual(len(interpreters), 2)
+
+    def test_each_check_names_its_purpose_and_the_interpreter_it_covers(self):
+        # #62: the state has to describe itself. A reader should not have to
+        # infer "battery" from an argv or coverage from a path.
+        pass_e.collect(ROOT, ["python3.11"])
+        made = self.made
+        purposes = [check["purpose"] for check in made]
+        self.assertEqual(sorted(purposes),
+                         ["battery", "battery", "compile", "head", "lint"])
+        batteries = [check for check in made if check["purpose"] == "battery"]
+        self.assertEqual({check["interpreter"] for check in batteries},
+                         {sys.executable, "python3.11"})
+        for check in made:
+            if check["purpose"] in ("lint", "compile"):
+                self.assertEqual(check["interpreter"], sys.executable)
+        head = [check for check in made if check["purpose"] == "head"]
+        self.assertIsNone(head[0]["interpreter"])
 
     def test_the_state_still_carries_one_lint_and_one_compile_check(self):
         pass_e.collect(ROOT, ["python3.11"])
