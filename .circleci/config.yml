@@ -16,7 +16,7 @@
 #
 # EXECUTOR CHOICES AND DEVIATIONS (recorded, per the work order):
 #   - Linux legs use the CircleCI first-party Docker image cimg/python:<ver>,
-#     one leg per matrix python version (3.9, 3.12, 3.13). The Actions
+#     one leg per matrix python version (3.11, 3.12, 3.13). The Actions
 #     ubuntu-latest leg becomes three CircleCI legs; same steps.
 #   - macOS uses the CircleCI macOS executor. Actions pinned the python
 #     version per leg with actions/setup-python; CircleCI macOS images ship a
@@ -148,7 +148,7 @@ workflows:
       - test_linux:
           matrix:
             parameters:
-              py: ["3.9", "3.12", "3.13"]
+              py: ["3.11", "3.12", "3.13"]
       - test_macos
       - test_windows
       - wheel
