@@ -133,15 +133,20 @@ class Budget:
             # The step ceiling judges the *step*, not the call. Outside a
             # step scope the two are the same thing -- one reservation, one
             # dispatch -- so a bare ``reserve`` keeps the old meaning.
-            tally = self._current_tally()
-            if tally is None:
+            tallies = self._open_tallies()
+            if not tallies:
                 if _at_precision(estimate) > _at_precision(self._step_ceiling):
                     raise BudgetRefused(estimate, self._step_ceiling, label)
             else:
-                projected = tally.committed + tally.outstanding + estimate
+                # The outermost open scope is the step being accounted for.
+                # Nested scopes do not buy a second allowance: a sub-step is
+                # judged against what the step that owns it has already
+                # committed, or a step could exceed its cap by nesting.
+                step = tallies[0]
+                projected = step.committed + step.outstanding + estimate
                 if _at_precision(projected) > _at_precision(self._step_ceiling):
                     raise BudgetRefused(projected, self._step_ceiling,
-                                        _step_label(tally.key, label))
+                                        _step_label(step.key, label))
             # Compare at the precision this budget reports in. Accumulated
             # float representation error in ``_spent`` otherwise makes the
             # remaining balance a hair smaller than a charge that fits
@@ -152,17 +157,18 @@ class Budget:
                                     limit="remaining")
             self._reserved += estimate
             reservation = Reservation(self, estimate, label)
-            if tally is not None:
-                tally.outstanding += estimate
-                reservation._step = tally
+            for step in tallies:
+                step.outstanding += estimate
+            reservation._steps = list(tallies)
             self._live.append(reservation)
             return reservation
 
     # -- step scoping ----------------------------------------------------
 
-    def _current_tally(self):
+    def _open_tallies(self):
+        """The step scopes open on this thread, outermost first."""
         stack = getattr(self._scopes, "stack", None)
-        return stack[-1] if stack else None
+        return list(stack) if stack else []
 
     @contextmanager
     def step_scope(self, key=""):
@@ -179,10 +185,10 @@ class Budget:
         the running total is what the ceiling judges, so a step cannot spend
         its cap twice. A settled reservation counts at what it actually
         charged; an open one counts at its reservation, because the step may
-        still have to pay that much. Scopes nest, and only the innermost one
-        is charged, so a sub-step cannot borrow its parent's headroom
-        silently -- the outer scope still sees the money leave the budget
-        through its own settlement records.
+        still have to pay that much. Scopes nest, and the **outermost** one is
+        what the ceiling is judged against: every open scope is charged, so a
+        sub-step cannot buy a second allowance and a step cannot exceed its
+        cap by nesting.
 
         An empty ``key`` is allowed for callers that have no id yet, and
         names itself in the refusal.
@@ -211,10 +217,9 @@ class Budget:
             reservation._finish(amount, source)
             self._reserved -= reservation.estimate
             self._spent += amount
-            tally = reservation._step
-            if tally is not None:
-                tally.outstanding -= reservation.estimate
-                tally.committed += amount
+            for step in reservation._steps:
+                step.outstanding -= reservation.estimate
+                step.committed += amount
             if reservation in self._live:
                 self._live.remove(reservation)
             self._entries.append({
@@ -313,7 +318,7 @@ class Reservation:
     """A held amount. Settles or cancels exactly once."""
 
     __slots__ = ("_budget", "estimate", "label", "state", "charged",
-                 "usage_source", "_step")
+                 "usage_source", "_steps")
 
     def __init__(self, budget, estimate, label):
         self._budget = budget
@@ -322,9 +327,11 @@ class Reservation:
         self.state = RESERVED
         self.charged = 0.0
         self.usage_source = None
-        #: The step this reservation was taken under, or ``None`` outside a
-        #: :meth:`Budget.step_scope`. Settlement reports back to it.
-        self._step = None
+        #: The step scopes this reservation was taken under, outermost first;
+        #: empty outside a :meth:`Budget.step_scope`. Settlement reports back
+        #: to every one of them, so a nested scope cannot hide spend from the
+        #: step that owns it.
+        self._steps = ()
 
     def settle(self, actual_usd=None, source=ACTUAL):
         """Charge the call.
