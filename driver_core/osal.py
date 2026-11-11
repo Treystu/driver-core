@@ -46,6 +46,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -830,10 +831,35 @@ def http_get(url, *, timeout=20, max_bytes=FETCH_MAX_BYTES):
 
     opener = urllib.request.build_opener(_NoRedirect)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with opener.open(request, timeout=timeout) as response:
-        body = response.read(max_bytes)
-        status = getattr(response, "status", None) or response.getcode()
-        charset = response.headers.get_content_charset() or "utf-8"
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            # One byte past the cap, so an oversized document can be told
+            # apart from one that merely fills it. ``read(n)`` returns *at
+            # most* n bytes and never says more was waiting, so reading
+            # exactly ``max_bytes`` turned a truncated document into a
+            # successful fetch -- the same false blank ``http_get`` refuses
+            # to return for an empty body.
+            body = response.read(max_bytes + 1)
+            status = getattr(response, "status", None) or response.getcode()
+            charset = response.headers.get_content_charset() or "utf-8"
+    except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            # urllib refuses a redirect to a non-http scheme itself, below
+            # ``_NoRedirect.redirect_request``, so the refusal it raises here
+            # is its own type rather than the OsalError this section
+            # documents. Re-raise it as the module's type so a caller
+            # catching DriverError sees a refused fetch as a named refusal.
+            detail = str(exc)
+            # The HTTPError holds the response body open; closing it here
+            # keeps a refused redirect from leaking a socket.
+            exc.close()
+            raise OsalError(
+                f"refusing a redirect while fetching {url!r}: {detail}") from None
+        raise
+    if len(body) > max_bytes:
+        raise OsalError(
+            f"{url!r} returned more than {max_bytes} bytes; refusing to "
+            f"pass on a truncated document as though it were complete")
     return status, body.decode(charset, "replace")
 
 
