@@ -138,6 +138,61 @@ class ReachabilityTests(unittest.TestCase):
         self.assertFalse(source.can_serve(Target("x", CLI)))
 
 
+class EmptyAnswerTests(unittest.TestCase):
+    """An empty payload is a decline, not a capture of nothing (#67).
+
+    ``read_document`` returns ``{}`` for a document with no static text, and
+    ``Capture.ok`` was ``payload is not None``, so an empty observation was
+    recorded as a successful capture: the chain stopped on it and the audit
+    record said ``ok`` about a state with no fields in it.
+    """
+
+    def test_an_empty_mapping_is_a_decline_not_an_answer(self):
+        source = StructuredSource(DOM, lambda target: {})
+        capture = source.capture(Target("app", DOM))
+        self.assertIsNone(capture.payload)
+        self.assertFalse(capture.ok)
+        self.assertIn("no state", capture.detail)
+
+    def test_a_blank_string_is_a_decline(self):
+        source = StructuredSource(CLI, lambda target: "   \n")
+        capture = source.capture(Target("app", CLI))
+        self.assertIsNone(capture.payload)
+        self.assertIn("no state", capture.detail)
+
+    def test_an_empty_sequence_is_a_decline(self):
+        source = StructuredSource(MCP, lambda target: [])
+        self.assertIsNone(source.capture(Target("app", MCP)).payload)
+
+    def test_a_real_payload_is_still_an_answer(self):
+        source = StructuredSource(CLI, lambda target: {"exit_code": 0})
+        capture = source.capture(Target("app", CLI))
+        self.assertTrue(capture.ok)
+        self.assertEqual(capture.payload, {"exit_code": 0})
+
+    def test_a_blank_answer_does_not_suppress_the_tier_that_had_state(self):
+        seen = []
+
+        def blank(target):
+            seen.append(CLI)
+            return "   "
+
+        def answer(target):
+            seen.append(DOM)
+            return {"window_title": "x"}
+
+        capture = select_capture("app", [StructuredSource(CLI, blank),
+                                         StructuredSource(DOM, answer)])
+        self.assertEqual(capture.source, DOM)
+        self.assertEqual(seen, [CLI, DOM])
+
+    def test_an_empty_dom_capture_is_named_in_the_refusal(self):
+        with self.assertRaises(PerceptionUnavailable) as ctx:
+            select_capture(Target("app", DOM),
+                           [StructuredSource(DOM, lambda target: {})])
+        self.assertIn("answered with no state", str(ctx.exception))
+
+
 class ReaderContractTests(unittest.TestCase):
     """A reader is handed the ref, never a Target object.
 
