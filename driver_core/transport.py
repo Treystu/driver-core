@@ -22,6 +22,29 @@ USER_AGENT = "driver-core/1.0"
 
 #: Outcomes of one transport attempt.
 OK = "ok"
+
+
+class EmittedFloat(float):
+    """A JSON number that remembers the literal the provider wrote.
+
+    ``float("0.500")`` is ``0.5`` and ``repr`` of it is ``"0.5"`` -- the
+    trailing zeros are gone, and with them the only evidence of how precisely
+    the endpoint emitted the number. That evidence decides how much rounding
+    a distribution is allowed, so it cannot be reconstructed afterwards.
+
+    This is a ``float`` subclass, so every existing caller keeps the number
+    it always got; the literal rides alongside on ``literal``.
+    """
+
+    __slots__ = ("literal",)
+
+    def __new__(cls, literal):
+        value = super().__new__(cls, literal)
+        value.literal = literal
+        return value
+
+    def __repr__(self):
+        return repr(float(self))
 HTTP_ERROR = "http_error"
 TRANSPORT_ERROR = "transport_error"
 MALFORMED = "malformed"
@@ -102,7 +125,7 @@ def request(url, *, method="POST", headers=None, body=None, timeout=60):
         return Response(0, TRANSPORT_ERROR, detail=f"transport failure: {exc}")
 
     try:
-        payload = json.loads(raw) if raw.strip() else {}
+        payload = json.loads(raw, parse_float=EmittedFloat) if raw.strip() else {}
     except json.JSONDecodeError as exc:
         return Response(status, MALFORMED, detail=f"unparseable body: {exc}",
                         raw=raw)

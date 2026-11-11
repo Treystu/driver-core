@@ -263,15 +263,40 @@ def build_questions(state, vocabulary, *, include_guards=True,
 
 
 def decimal_places(value):
-    """How many decimal places a number appears to have been emitted with."""
+    """How many decimal places a number was **emitted** with.
+
+    Read from the literal the provider wrote when the transport still has it
+    (:class:`driver_core.transport.EmittedFloat`), because ``repr`` of the
+    float cannot show a trailing zero: ``0.500`` and ``0.5`` are the same
+    float, and reconstructing the first from the second is impossible. Grid
+    inference is a maximum over entries, so one lost zero can coarsen the
+    whole distribution's grid and widen its tolerance -- the failure
+    direction is permissive, which is why it matters.
+
+    Values that carry no literal (plain floats from a caller, JSON produced
+    without the transport, ``Decimal``) fall back to their own text form: a
+    ``Decimal`` keeps its exponent, a plain float gets the old ``repr``
+    reading.
+    """
+    literal = getattr(value, "literal", None)
+    if isinstance(literal, str):
+        return _places_in(literal)
+    if isinstance(value, str):
+        return _places_in(value)
     try:
         text = repr(float(value))
     except (TypeError, ValueError):
         return COARSEST_INFERRED_DECIMAL_PLACE
+    return _places_in(text)
+
+
+def _places_in(text):
+    """Decimal places as the text spells them, keeping significant zeros."""
+    text = text.strip()
     if "e" in text or "E" in text:
         return 18
     _whole, _, fraction = text.partition(".")
-    return len(fraction.rstrip("0"))
+    return len(fraction.rstrip("0")) if not fraction else len(fraction)
 
 
 def inferred_grid(probabilities):
@@ -285,10 +310,12 @@ def inferred_grid(probabilities):
     places = COARSEST_INFERRED_DECIMAL_PLACE
     for value in (probabilities or {}).values():
         try:
-            number = float(value)
+            float(value)
         except (TypeError, ValueError):
             continue
-        places = max(places, decimal_places(number))
+        # The value itself, not its float: re-floating it here is precisely
+        # how the emitted literal -- and the grid it evidences -- was lost.
+        places = max(places, decimal_places(value))
     return places
 
 
@@ -384,7 +411,11 @@ def validate_answers(answers, questions, vocabulary):
         reasons.append("choice answer carried no probability distribution")
         return None, None, {}, {}, reasons
     try:
-        probabilities = {str(k): float(v) for k, v in probabilities.items()}
+        # Kept as-is rather than coerced, because coercion through ``float``
+        # is what throws away the literal the grid is inferred from. A value
+        # the transport did not type (a string, say) is still coerced.
+        probabilities = {str(k): (v if isinstance(v, (int, float)) else float(v))
+                         for k, v in probabilities.items()}
     except (TypeError, ValueError):
         reasons.append("probability distribution was not numeric")
         return None, None, {}, {}, reasons

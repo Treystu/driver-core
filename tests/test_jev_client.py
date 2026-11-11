@@ -17,10 +17,10 @@ from driver_core.executor_registry import build_driver_registry
 from driver_core.jev_client import (
     COARSEST_INFERRED_DECIMAL_PLACE, FLOAT_NOISE_TOLERANCE,
     MALFORMED, MAX_ACCEPTED_DEVIATION, NATIVE, UNAVAILABLE, UNKEYED,
-    Decision, JevClient, accepted_deviation, build_questions, inferred_grid,
-    offered_actions, probability_deviation, validate_answers,
+    Decision, JevClient, accepted_deviation, build_questions, decimal_places,
+    inferred_grid, offered_actions, probability_deviation, validate_answers,
 )
-from driver_core.transport import Response
+from driver_core.transport import EmittedFloat, Response
 from driver_core.ev import (
     FakeTransport, action_answer, no_usage_response, ok_response,
 )
@@ -338,6 +338,40 @@ class DistributionDerivationTests(unittest.TestCase):
     def test_the_deviation_is_the_distance_from_one(self):
         self.assertAlmostEqual(probability_deviation({"a": 0.5}), -0.5)
         self.assertAlmostEqual(probability_deviation({"a": 1.0}), 0.0)
+
+    def test_a_trailing_zero_is_evidence_of_the_grid(self):
+        """``0.500`` is three places even though the float is ``0.5``."""
+        self.assertEqual(decimal_places(EmittedFloat("0.500")), 3)
+        self.assertEqual(decimal_places(0.5), 1)
+        self.assertEqual(inferred_grid({"a": EmittedFloat("0.500"),
+                                        "b": EmittedFloat("0.500")}), 3)
+        self.assertAlmostEqual(
+            accepted_deviation({"a": EmittedFloat("0.500"),
+                                "b": EmittedFloat("0.500")}), 0.001)
+
+    def test_dropping_the_literal_is_what_widens_the_tolerance(self):
+        """The same payload, read without its literals, is 100x too permissive.
+
+        This is the defect the cure exists for: grid inference is a maximum,
+        so one lost trailing zero coarsens the whole distribution and the
+        tolerance silently widens toward the cap.
+        """
+        kept = {"a": EmittedFloat("0.500"), "b": EmittedFloat("0.500")}
+        lost = {key: float(value) for key, value in kept.items()}
+        self.assertLess(accepted_deviation(kept), accepted_deviation(lost))
+        self.assertAlmostEqual(accepted_deviation(lost), 0.1)
+        self.assertAlmostEqual(accepted_deviation(kept), 0.001)
+
+    def test_the_transport_decode_keeps_the_literal(self):
+        """The seam, not just the helper: json -> EmittedFloat -> grid."""
+        import json
+
+        body = '{"probabilities": {"a": 0.500, "b": 0.50}}'
+        decoded = json.loads(body, parse_float=EmittedFloat)
+        probabilities = decoded["probabilities"]
+        self.assertEqual(inferred_grid(probabilities), 3)
+        self.assertAlmostEqual(float(probabilities["a"]), 0.5)
+        self.assertEqual(decimal_places(probabilities["b"]), 2)
         self.assertIsNone(probability_deviation({"a": "nonsense"}))
 
 
