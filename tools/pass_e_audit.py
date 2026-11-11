@@ -35,6 +35,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from driver_core import transport                                  # noqa: E402
 from driver_core.config import load_settings                       # noqa: E402
+from driver_core.jev_client import SYSTEM_ONE_URL                   # noqa: E402
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -149,9 +150,16 @@ def ask(state, settings):
         raise SystemExit(
             "no Jev key configured: set DRIVER_JEV_API_KEY (or run with "
             "--no-call to print the artifacts and their digest)")
+    # The endpoint is a property of the service, not of the settings: there
+    # is one System One URL and ``jev_client`` owns it. Reading it off
+    # settings was a bug that only a keyed run could reach.
     response = transport.call_service(
-        settings.jev_endpoint, questions(),
+        SYSTEM_ONE_URL, questions(),
         headers={"Authorization": f"Bearer {settings.jev_api_key}"},
+        # The service rejects a body without ``model`` (HTTP 422), and the
+        # state is what the questions are asked about -- both travel exactly
+        # as the package's own client sends them.
+        body_extra={"state": state, "model": settings.jev_model},
         timeout=120)
     payload = transport.require(response, "jev")
     answers = (payload.get("answers") or {})
