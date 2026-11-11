@@ -197,6 +197,23 @@ class Driver:
 
     def step(self, target, *, schema=None, consent=None, step_id=None,
              prefer=(), require_stable=True, params=None):
+        """Run one full step inside its own budget scope.
+
+        The whole step runs inside :meth:`Budget.step_scope`, so
+        ``step_ceiling_usd`` bounds what the step spends **in total** rather
+        than what any one of its dispatches spends. A step that retries a
+        ladder is exactly the case where those two differ: bounded per call,
+        a ten-rung ladder could spend ten times the declared cap.
+        """
+        step_id = step_id or uuid.uuid4().hex[:12]
+        with self.budget.step_scope(step_id):
+            return self._run_step(
+                target, schema=schema or SCREEN_SCHEMA, consent=consent,
+                step_id=step_id, prefer=prefer,
+                require_stable=require_stable, params=params)
+
+    def _run_step(self, target, *, schema, consent, step_id, prefer,
+                  require_stable, params):
         """Run one full step. Returns a :class:`StepResult`; never raises for
         a blocked or degraded condition.
 
@@ -208,8 +225,6 @@ class Driver:
         caller's side of the line is also what lets them be shown to an
         operator and consented to as a single ``(action, params)`` pair.
         """
-        step_id = step_id or uuid.uuid4().hex[:12]
-        schema = schema or SCREEN_SCHEMA
 
         # 1. capture
         try:
