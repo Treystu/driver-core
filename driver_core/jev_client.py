@@ -152,7 +152,8 @@ class Decision:
             "output_tokens": self.output_tokens,
             "usage_source": self.usage_source,
             "stop_reason": self.stop_reason,
-            "probability_deviation": round(self.probability_deviation, 9),
+            "probability_deviation": _stable_zero(
+                round(self.probability_deviation, 9)),
             "usable": self.usable,
         }
 
@@ -174,7 +175,8 @@ class Decision:
             "native": self.native,
             "cost_usd": round(self.cost, 9),
             "usage_source": self.usage_source,
-            "probability_deviation": round(self.probability_deviation, 9),
+            "probability_deviation": _stable_zero(
+                round(self.probability_deviation, 9)),
         }
 
     def __repr__(self):
@@ -319,6 +321,22 @@ def accepted_deviation(probabilities):
     unit = 10.0 ** -inferred_grid(probabilities)
     return min(max(FLOAT_NOISE_TOLERANCE, len(probabilities) * unit / 2.0),
                MAX_ACCEPTED_DEVIATION)
+
+
+def _stable_zero(value):
+    """A zero written into a record has one sign, whatever the sum did.
+
+    ``sum()`` gained Neumaier compensated summation in 3.12, so a
+    distribution that sums to 1 by construction lands exactly on ``0.0``
+    there and one ulp off on 3.9-3.11. Rounded to nine places that ulp is
+    ``-0.0``, which ``json.dumps`` renders as ``"-0.0"`` -- a different byte
+    string, therefore a different SHA-256, therefore an audit chain that
+    cannot be reproduced on the interpreter that wrote it (issue #31).
+
+    ``+ 0.0`` is the IEEE identity for every finite value except ``-0.0``,
+    which it normalises, so no other number this record carries can move.
+    """
+    return value + 0.0
 
 
 def probability_deviation(probabilities):

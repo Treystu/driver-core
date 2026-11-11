@@ -46,6 +46,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -87,6 +88,21 @@ def platform_name():
     if sys.platform.startswith("linux"):
         return "linux"
     return f"unknown:{sys.platform}"
+
+
+def _read_capped(handle, max_bytes):
+    """Read at most ``max_bytes`` from ``handle``; report the full size.
+
+    Returns ``(text, produced_bytes)``. ``produced_bytes`` is the size the
+    child actually wrote, so a caller can see that it was given a prefix;
+    it is ``None`` when the size cannot be established.
+    """
+    handle.flush()
+    handle.seek(0, os.SEEK_END)
+    produced = handle.tell()
+    handle.seek(0)
+    kept = handle.read(max_bytes)
+    return kept.decode("utf-8", "replace"), produced
 
 
 def run(argv, *, cwd=None, timeout=DEFAULT_TIMEOUT, env=None, input_text=None,
@@ -134,44 +150,72 @@ def run(argv, *, cwd=None, timeout=DEFAULT_TIMEOUT, env=None, input_text=None,
     if platform_name() == "windows":
         popen_kwargs["creationflags"] = CREATE_NO_WINDOW
 
-    try:
-        completed = subprocess.run(
-            argv, input=(input_text.encode("utf-8") if input_text is not None
-                         else None),
-            timeout=timeout, env=child_env, check=False, **popen_kwargs)
-    except FileNotFoundError:
-        return ProcessResult(0, False, "", "", f"not found: {argv[0]}",
-                             reason="not_found")
-    except subprocess.TimeoutExpired:
-        return ProcessResult(0, False, "", "",
-                             f"timed out after {timeout}s", reason="timeout")
-    except OSError as exc:
-        return ProcessResult(0, False, "", "", f"failed to start: {exc}",
-                             reason="os_error")
+    # Spool both pipes to disk instead of buffering them in memory. Reading
+    # through ``PIPE`` meant ``communicate()`` held the child's *entire*
+    # output before the cap was ever consulted, so a command that printed
+    # without bound exhausted the driver's memory at a 1 MiB cap -- the exact
+    # failure ``MAX_CAPTURE_BYTES`` says it prevents.
+    with tempfile.TemporaryFile() as out_file, \
+            tempfile.TemporaryFile() as err_file:
+        popen_kwargs["stdout"] = out_file
+        popen_kwargs["stderr"] = err_file
+        try:
+            completed = subprocess.run(
+                argv, input=(input_text.encode("utf-8")
+                             if input_text is not None else None),
+                timeout=timeout, env=child_env, check=False, **popen_kwargs)
+        except FileNotFoundError:
+            return ProcessResult(0, False, "", "", f"not found: {argv[0]}",
+                                 reason="not_found")
+        except subprocess.TimeoutExpired:
+            return ProcessResult(0, False, "", "",
+                                 f"timed out after {timeout}s",
+                                 reason="timeout")
+        except OSError as exc:
+            return ProcessResult(0, False, "", "", f"failed to start: {exc}",
+                                 reason="os_error")
 
-    stdout = (completed.stdout or b"")[:max_bytes].decode("utf-8", "replace")
-    stderr = (completed.stderr or b"")[:max_bytes].decode("utf-8", "replace")
+        stdout, produced = _read_capped(out_file, max_bytes)
+        stderr, _ = _read_capped(err_file, max_bytes)
+
+    truncated = produced is not None and produced > max_bytes
+    detail = ""
+    if truncated:
+        detail = (f"output truncated: {produced} bytes produced, "
+                  f"{max_bytes} kept")
     return ProcessResult(completed.returncode, completed.returncode == 0,
-                         stdout, stderr, "")
+                         stdout, stderr, detail,
+                         truncated=truncated, captured_bytes=produced)
 
 
 class ProcessResult:
     """One child process's outcome."""
 
-    __slots__ = ("returncode", "ok", "stdout", "stderr", "error", "reason")
+    __slots__ = ("returncode", "ok", "stdout", "stderr", "error", "reason",
+                 "truncated", "captured_bytes")
 
-    def __init__(self, returncode, ok, stdout, stderr, error, reason=""):
+    def __init__(self, returncode, ok, stdout, stderr, error, reason="",
+                 truncated=False, captured_bytes=None):
         self.returncode = returncode
         self.ok = ok
         self.stdout = stdout
         self.stderr = stderr
         self.error = error
         self.reason = reason
+        #: True when the child produced more than the capture cap allowed.
+        #: Carried rather than inferred: a caller handed a prefix cannot tell
+        #: it from a complete answer, which is the failure this module exists
+        #: to prevent (see ``http_get`` for the same rule on the wire).
+        self.truncated = truncated
+        #: How many bytes the child actually produced, when it is known.
+        self.captured_bytes = captured_bytes
 
     def to_dict(self):
         return {"returncode": self.returncode, "ok": self.ok,
                 "stdout": self.stdout, "stderr": self.stderr,
-                "error": self.error, "reason": self.reason}
+                "error": self.error, "reason": self.reason,
+                "truncated": self.truncated,
+                "captured_bytes": self.captured_bytes}
 
     def __repr__(self):
         return f"ProcessResult(rc={self.returncode}, ok={self.ok})"
@@ -830,10 +874,35 @@ def http_get(url, *, timeout=20, max_bytes=FETCH_MAX_BYTES):
 
     opener = urllib.request.build_opener(_NoRedirect)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with opener.open(request, timeout=timeout) as response:
-        body = response.read(max_bytes)
-        status = getattr(response, "status", None) or response.getcode()
-        charset = response.headers.get_content_charset() or "utf-8"
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            # One byte past the cap, so an oversized document can be told
+            # apart from one that merely fills it. ``read(n)`` returns *at
+            # most* n bytes and never says more was waiting, so reading
+            # exactly ``max_bytes`` turned a truncated document into a
+            # successful fetch -- the same false blank ``http_get`` refuses
+            # to return for an empty body.
+            body = response.read(max_bytes + 1)
+            status = getattr(response, "status", None) or response.getcode()
+            charset = response.headers.get_content_charset() or "utf-8"
+    except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            # urllib refuses a redirect to a non-http scheme itself, below
+            # ``_NoRedirect.redirect_request``, so the refusal it raises here
+            # is its own type rather than the OsalError this section
+            # documents. Re-raise it as the module's type so a caller
+            # catching DriverError sees a refused fetch as a named refusal.
+            detail = str(exc)
+            # The HTTPError holds the response body open; closing it here
+            # keeps a refused redirect from leaking a socket.
+            exc.close()
+            raise OsalError(
+                f"refusing a redirect while fetching {url!r}: {detail}") from None
+        raise
+    if len(body) > max_bytes:
+        raise OsalError(
+            f"{url!r} returned more than {max_bytes} bytes; refusing to "
+            f"pass on a truncated document as though it were complete")
     return status, body.decode(charset, "replace")
 
 

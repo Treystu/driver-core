@@ -17,7 +17,7 @@ from driver_core.executor_registry import build_driver_registry
 from driver_core.jev_client import (
     COARSEST_INFERRED_DECIMAL_PLACE, FLOAT_NOISE_TOLERANCE,
     MALFORMED, MAX_ACCEPTED_DEVIATION, NATIVE, UNAVAILABLE, UNKEYED,
-    JevClient, accepted_deviation, build_questions, inferred_grid,
+    Decision, JevClient, accepted_deviation, build_questions, inferred_grid,
     offered_actions, probability_deviation, validate_answers,
 )
 from driver_core.transport import Response
@@ -423,6 +423,48 @@ class RoundedDistributionTests(unittest.TestCase):
                                  performable=self.offered)
         self.assertTrue(decision.usable)
         self.assertEqual(decision.probability_deviation, 0.0)
+
+
+class StableZeroTests(unittest.TestCase):
+    """A recorded zero has one sign on every interpreter (issue #31).
+
+    ``sum()`` gained Neumaier compensated summation in 3.12: a distribution
+    summing to 1 by construction lands on exactly ``0.0`` there and one ulp
+    off on 3.9-3.11. Rounded to nine places that ulp is ``-0.0``, which
+    serialises as ``"-0.0"`` -- a different byte string, so a different hash,
+    so a chain that cannot be reproduced on the interpreter that wrote it.
+    """
+
+    ULP_LOW = -2.220446049250313e-16      # what sum()-1.0 gives on <=3.11
+
+    def test_the_recorded_deviation_is_never_a_negative_zero(self):
+        import json
+
+        decision = Decision("native", confidence=0.9,
+                            probability_deviation=self.ULP_LOW)
+        self.assertEqual(json.dumps(decision.to_dict()["probability_deviation"]),
+                         "0.0")
+        self.assertEqual(
+            json.dumps(decision.audit_fields()["probability_deviation"]),
+            "0.0")
+
+    def test_no_other_number_is_moved_by_the_normalisation(self):
+        import json
+
+        for value in (0.5, -0.5, 1e-17, 0.06923076923076923, -1.0):
+            with self.subTest(value=value):
+                decision = Decision("native", probability_deviation=value)
+                self.assertEqual(
+                    json.dumps(decision.to_dict()["probability_deviation"]),
+                    json.dumps(round(value, 9)))
+
+    def test_the_ulp_rounds_into_the_negative_zero_the_fix_removes(self):
+        """The mechanism, stated as a fact rather than assumed."""
+        import json
+
+        self.assertEqual(repr(round(self.ULP_LOW, 9)), "-0.0")
+        self.assertEqual(json.dumps(round(self.ULP_LOW, 9)), "-0.0")
+        self.assertEqual(json.dumps(round(self.ULP_LOW, 9) + 0.0), "0.0")
 
 
 if __name__ == "__main__":

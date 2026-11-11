@@ -14,6 +14,7 @@ the shape of a ``for`` loop.
 """
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 
@@ -230,6 +231,81 @@ class FallThroughTests(unittest.TestCase):
         self.assertIn("reader failed: the reader exploded", str(ctx.exception))
 
 
+class HostSourceTests(unittest.TestCase):
+    """A source this package did not write still gets consulted.
+
+    ``select_capture`` is handed "things that have a name, a ``serves`` and a
+    ``capture``", and the README offers ``Driver(sources=(...))`` as the way to
+    register your own. Iterating the declared names rather than the candidates
+    meant such a source was filtered in and then never called, while the
+    refusal reported that everything had been tried.
+    """
+
+    class _HostSource:
+        serves = (CLI,)
+
+        def __init__(self, name, answer, calls=None):
+            self.name = name
+            self._answer = answer
+            self._calls = calls if calls is not None else []
+
+        def can_serve(self, target):
+            return not target.declared or target.target_class == CLI
+
+        def capture(self, target):
+            self._calls.append(self.name)
+            if self._answer is None:
+                return Capture(self.name, target, None,
+                               detail="host source had nothing")
+            return Capture(self.name, target, self._answer,
+                           fingerprint="host-fp")
+
+    def test_a_host_named_source_is_called_and_answers(self):
+        source = self._HostSource("host-api", {"exit_code": 0})
+        capture = select_capture(Target("app", CLI), [source])
+        self.assertEqual(capture.source, "host-api")
+        self.assertEqual(capture.payload, {"exit_code": 0})
+
+    def test_a_host_source_is_tried_after_the_declared_tiers(self):
+        seen = []
+
+        def recorder(name, answer):
+            def reader(target):
+                seen.append(name)
+                return answer
+            return reader
+
+        host = self._HostSource("host-api", {"exit_code": 0}, calls=seen)
+        sources = [host, StructuredSource(CLI, recorder(CLI, None))]
+        capture = select_capture(Target("app", CLI), sources)
+        self.assertEqual(seen, [CLI, "host-api"])
+        self.assertEqual(capture.source, "host-api")
+
+    def test_a_host_source_declining_is_named_in_the_refusal(self):
+        source = self._HostSource("host-api", None)
+        with self.assertRaises(PerceptionUnavailable) as ctx:
+            select_capture(Target("app", CLI), [source])
+        self.assertIn("host-api: host source had nothing", str(ctx.exception))
+        self.assertNotIn("Tried: none", str(ctx.exception))
+
+    def test_a_declining_host_source_does_not_block_the_screen_tier(self):
+        """Pixels stay last, not unreachable, once a host source declines."""
+
+        class ScreenAndCli(self._HostSource):
+            serves = (CLI, GUI)
+
+            def can_serve(self, target):
+                return True
+
+        screen = ExplodingScreen()
+        screen.capture = lambda target=None: Capture(  # noqa: E731
+            GUI, target, "pixels")
+        host = ScreenAndCli("host-api", None)
+        capture = select_capture(Target("app", GUI), [host, screen])
+        self.assertEqual(capture.source, GUI)
+        self.assertEqual(host._calls, ["host-api"])
+
+
 class PoolSelectionTests(unittest.TestCase):
     """The extraction side of the same guarantee."""
 
@@ -348,6 +424,210 @@ class OsalInputTests(unittest.TestCase):
         with self.assertRaises(Exception) as ctx:
             osal.http_get("http:///no-host")
         self.assertIn("no host", str(ctx.exception))
+
+
+class TruncatedCaptureTests(unittest.TestCase):
+    """A capture the cap cut short is a failure to ask, not an answer.
+
+    ``osal.run`` carries ``truncated`` and the produced byte count (#41); the
+    adapters ignored both, so a 5 MB command was stored as a 1 MiB payload
+    whose fingerprint was byte-identical to a genuine 1 MiB answer.
+    """
+
+    def _cli(self, script, **kwargs):
+        from driver_core.adapters import CliSource
+        return CliSource([sys.executable, "-c", script], **kwargs)
+
+    def test_an_over_cap_command_is_refused_with_both_sizes(self):
+        from driver_core.observation import Target
+        capture = self._cli("import sys; sys.stdout.write('y'*5_000_000)").capture(
+            Target("probe", "cli"))
+        self.assertIsNone(capture.payload)
+        self.assertIn("truncated", capture.detail)
+        self.assertIn("5000000", capture.detail)
+        self.assertEqual(capture.fingerprint, "")
+
+    def test_an_under_cap_command_is_unchanged(self):
+        from driver_core.observation import Target
+        capture = self._cli("print('hello')").capture(Target("probe", "cli"))
+        self.assertEqual(capture.payload["stdout"].strip(), "hello")
+        self.assertEqual(capture.detail, "")
+        self.assertNotEqual(capture.fingerprint, "")
+
+    def test_a_timeout_is_still_a_timeout(self):
+        from driver_core.observation import Target
+        capture = self._cli("import time; time.sleep(20)", timeout=2).capture(
+            Target("probe", "cli"))
+        self.assertIsNone(capture.payload)
+        self.assertIn("timed out", capture.detail)
+
+    def _mcp(self, script):
+        from driver_core.adapters import McpSource
+        return McpSource([sys.executable, "-c", script], tool="read")
+
+    def test_an_over_cap_mcp_reply_names_truncation(self):
+        from driver_core.observation import Target
+        script = ("import sys, json; "
+                  "sys.stdout.write('x'*1_200_000 + chr(10)); "
+                  "sys.stdout.write(json.dumps({'jsonrpc':'2.0','id':2,"
+                  "'result':{'structuredContent':{'answer':'ok'}}}) + chr(10))")
+        capture = self._mcp(script).capture(Target("probe", "mcp"))
+        self.assertIsNone(capture.payload)
+        self.assertIn("truncated", capture.detail)
+        self.assertNotIn("no structured content", capture.detail)
+
+    def test_a_normal_mcp_reply_still_parses(self):
+        from driver_core.observation import Target
+        script = ("import sys, json; "
+                  "sys.stdout.write(json.dumps({'jsonrpc':'2.0','id':2,"
+                  "'result':{'structuredContent':{'answer':'ok'}}}) + chr(10))")
+        capture = self._mcp(script).capture(Target("probe", "mcp"))
+        self.assertEqual(capture.payload, {"answer": "ok"})
+        self.assertEqual(capture.detail, "")
+
+
+class CaptureCapTests(unittest.TestCase):
+    """The capture cap must both bound memory and say when it bit.
+
+    ``MAX_CAPTURE_BYTES`` claims a command that prints without bound cannot
+    exhaust the driver's memory. Buffering the whole output and slicing it
+    afterwards delivered neither half: 20 MB of child output peaked at 21.9 MB
+    in the parent at a 1024-byte cap, and the caller could not tell the
+    prefix it received from a complete answer.
+    """
+
+    CAP = 1024
+
+    def test_output_under_the_cap_is_not_marked_truncated(self):
+        result = osal.run([sys.executable, "-c", "print('small')"],
+                          max_bytes=self.CAP)
+        self.assertTrue(result.ok)
+        self.assertFalse(result.truncated)
+        self.assertEqual(result.stdout.strip(), "small")
+        self.assertEqual(result.error, "")
+
+    def test_output_over_the_cap_is_marked_and_counted(self):
+        produced = 20_000_000
+        result = osal.run(
+            [sys.executable, "-c",
+             f"import sys; sys.stdout.write('y'*{produced})"],
+            max_bytes=self.CAP)
+        self.assertEqual(len(result.stdout), self.CAP)
+        self.assertTrue(result.truncated)
+        self.assertEqual(result.captured_bytes, produced)
+        self.assertIn(str(produced), result.error)
+        self.assertIn(str(self.CAP), result.error)
+        self.assertTrue(result.to_dict()["truncated"])
+
+    def test_the_cap_bounds_the_parent_memory(self):
+        import tracemalloc
+        tracemalloc.start()
+        try:
+            osal.run([sys.executable, "-c",
+                      "import sys; sys.stdout.write('y'*5_000_000)"],
+                     max_bytes=self.CAP)
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        # Buffering the child's output would put the peak near 5 MB.
+        self.assertLess(peak, 2_000_000, f"peak {peak} bytes at a {self.CAP} cap")
+
+    def test_a_finished_child_with_input_text_is_unaffected(self):
+        result = osal.run(
+            [sys.executable, "-c",
+             "import sys; sys.stdin.read(); sys.stdout.write('got')"],
+            input_text="hi")
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(result.stdout, "got")
+        self.assertFalse(result.truncated)
+
+    def test_a_timeout_is_still_a_named_refusal(self):
+        result = osal.run([sys.executable, "-c", "import time; time.sleep(10)"],
+                          timeout=1)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "timeout")
+        self.assertIn("timed out after 1s", result.error)
+
+
+class NetworkFetchTests(unittest.TestCase):
+    """``http_get`` against a real loopback server.
+
+    A local server rather than a mocked opener: the defects these defend
+    against -- a truncated body reported as success, and a refusal arriving
+    as urllib's own exception type -- live in the interaction between
+    ``read(n)``, ``Content-Length`` and urllib's redirect handling, none of
+    which a stub reproduces.
+    """
+
+    def setUp(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                if self.path == "/ok":
+                    self._send(200, b"hello")
+                elif self.path == "/exact":
+                    self._send(200, b"x" * outer.cap)
+                elif self.path == "/over":
+                    self._send(200, b"x" * (outer.cap + 1))
+                elif self.path == "/tofile":
+                    self.send_response(302)
+                    self.send_header("Location", "file:///etc/passwd")
+                    self.end_headers()
+                elif self.path == "/missing":
+                    self._send(404, b"nope")
+                else:
+                    self._send(500, b"?")
+
+            def _send(self, code, body):
+                self.send_response(code)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.cap = 2048
+        self.server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever,
+                                       daemon=True)
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def test_a_document_at_the_cap_is_returned_whole(self):
+        status, body = osal.http_get(self.base + "/exact", max_bytes=self.cap)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(body), self.cap)
+
+    def test_a_document_over_the_cap_is_a_named_refusal(self):
+        with self.assertRaises(osal.OsalError) as ctx:
+            osal.http_get(self.base + "/over", max_bytes=self.cap)
+        self.assertIn(str(self.cap), str(ctx.exception))
+        self.assertIn("truncated", str(ctx.exception))
+
+    def test_a_redirect_to_a_disk_scheme_is_an_osal_refusal(self):
+        with self.assertRaises(osal.OsalError) as ctx:
+            osal.http_get(self.base + "/tofile")
+        self.assertIn("redirect", str(ctx.exception))
+
+    def test_a_plain_http_error_still_carries_its_status(self):
+        import urllib.error
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            osal.http_get(self.base + "/missing")
+        self.assertEqual(ctx.exception.code, 404)
+        ctx.exception.close()
+
+    def test_a_normal_document_is_returned(self):
+        status, body = osal.http_get(self.base + "/ok")
+        self.assertEqual((status, body), (200, "hello"))
 
 
 class McpParsingTests(unittest.TestCase):
