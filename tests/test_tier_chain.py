@@ -350,6 +350,87 @@ class OsalInputTests(unittest.TestCase):
         self.assertIn("no host", str(ctx.exception))
 
 
+class NetworkFetchTests(unittest.TestCase):
+    """``http_get`` against a real loopback server.
+
+    A local server rather than a mocked opener: the defects these defend
+    against -- a truncated body reported as success, and a refusal arriving
+    as urllib's own exception type -- live in the interaction between
+    ``read(n)``, ``Content-Length`` and urllib's redirect handling, none of
+    which a stub reproduces.
+    """
+
+    def setUp(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                if self.path == "/ok":
+                    self._send(200, b"hello")
+                elif self.path == "/exact":
+                    self._send(200, b"x" * outer.cap)
+                elif self.path == "/over":
+                    self._send(200, b"x" * (outer.cap + 1))
+                elif self.path == "/tofile":
+                    self.send_response(302)
+                    self.send_header("Location", "file:///etc/passwd")
+                    self.end_headers()
+                elif self.path == "/missing":
+                    self._send(404, b"nope")
+                else:
+                    self._send(500, b"?")
+
+            def _send(self, code, body):
+                self.send_response(code)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.cap = 2048
+        self.server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever,
+                                       daemon=True)
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def test_a_document_at_the_cap_is_returned_whole(self):
+        status, body = osal.http_get(self.base + "/exact", max_bytes=self.cap)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(body), self.cap)
+
+    def test_a_document_over_the_cap_is_a_named_refusal(self):
+        with self.assertRaises(osal.OsalError) as ctx:
+            osal.http_get(self.base + "/over", max_bytes=self.cap)
+        self.assertIn(str(self.cap), str(ctx.exception))
+        self.assertIn("truncated", str(ctx.exception))
+
+    def test_a_redirect_to_a_disk_scheme_is_an_osal_refusal(self):
+        with self.assertRaises(osal.OsalError) as ctx:
+            osal.http_get(self.base + "/tofile")
+        self.assertIn("redirect", str(ctx.exception))
+
+    def test_a_plain_http_error_still_carries_its_status(self):
+        import urllib.error
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            osal.http_get(self.base + "/missing")
+        self.assertEqual(ctx.exception.code, 404)
+        ctx.exception.close()
+
+    def test_a_normal_document_is_returned(self):
+        status, body = osal.http_get(self.base + "/ok")
+        self.assertEqual((status, body), (200, "hello"))
+
+
 class McpParsingTests(unittest.TestCase):
     """The JSON-RPC reader, against the shapes real servers emit."""
 
