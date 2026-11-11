@@ -129,11 +129,22 @@ def state_digest(state):
 
 
 def collect(repo_root, interpreters, *, timeout=1800):
-    """Run the lane's green bar and return the checks, in the order given."""
+    """Run the lane's green bar and return the checks.
+
+    The interpreter running this tool is always included, deduplicated: a
+    state that omits the interpreter the audit itself runs on reports an
+    incomplete bar while presenting a summary that looks whole, which is the
+    silent hole this tool exists to close. ``ruff`` and ``compileall`` are
+    already invoked through ``sys.executable``, so without this the state
+    mixed one interpreter's toolchain with other interpreters' batteries.
+    """
     root = pathlib.Path(repo_root)
+    order = list(interpreters)
+    if sys.executable not in order:
+        order.append(sys.executable)
     checks = [run_check(["git", "rev-parse", "--short", "HEAD"], cwd=root,
                         timeout=timeout)]
-    for interpreter in interpreters:
+    for interpreter in order:
         checks.append(run_check(
             [interpreter, "-W", "error::ResourceWarning", "-m", "unittest",
              "discover", "-s", "tests", "-t", "."], cwd=root, timeout=timeout))
