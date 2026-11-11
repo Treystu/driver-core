@@ -728,5 +728,60 @@ class EstimateTests(unittest.TestCase):
         self.assertIn("refusing to run", result.stderr)
 
 
+class GroundedLoopConfigurationTests(unittest.TestCase):
+    """The audit's loop configuration is named, forwarded, and pinned.
+
+    The audit and the library it forwards to disagreed (0.9/3 against
+    0.99/24) with nothing at either call site saying so. Whatever the
+    configuration is meant to be, it can no longer drift silently: the
+    constants below are what both entry points forward.
+    """
+
+    def test_both_entry_points_forward_the_named_configuration(self):
+        import inspect
+
+        for func in (jev_audit.audit_symbol, jev_audit.audit):
+            with self.subTest(func=func.__name__):
+                params = inspect.signature(func).parameters
+                self.assertEqual(params["gate"].default, jev_audit.AUDIT_GATE)
+                self.assertEqual(params["need_floor"].default,
+                                 jev_audit.AUDIT_NEED_FLOOR)
+                self.assertEqual(params["max_rounds"].default,
+                                 jev_audit.AUDIT_MAX_ROUNDS)
+
+    def test_the_configuration_is_stated_not_inherited_by_accident(self):
+        from driver_core.jev_context import ask_until_grounded
+
+        defaults = ask_until_grounded.__kwdefaults__
+        self.assertNotEqual(jev_audit.AUDIT_GATE, defaults["gate"])
+        self.assertNotEqual(jev_audit.AUDIT_MAX_ROUNDS,
+                            defaults["max_rounds"])
+        # The audit's loop is the shallow one, and that is the point of naming
+        # it: a per-symbol audit inside a fifty-cent budget.
+        self.assertLess(jev_audit.AUDIT_MAX_ROUNDS, defaults["max_rounds"])
+        self.assertLess(jev_audit.AUDIT_GATE, defaults["gate"])
+
+    def test_the_loop_receives_them_rather_than_its_own_defaults(self):
+        seen = {}
+        original = jev_audit.ask_until_grounded
+
+        def spy(*args, **kwargs):
+            seen.update(kwargs)
+            raise AssertionError("stop before any transport is touched")
+
+        known = list(jev_audit.symbols(ROOT))
+        self.assertTrue(known)
+        jev_audit.ask_until_grounded = spy
+        try:
+            with self.assertRaises(AssertionError):
+                jev_audit.audit_symbol(known[0], known, {},
+                                       settings=object())
+        finally:
+            jev_audit.ask_until_grounded = original
+        self.assertEqual(seen["gate"], jev_audit.AUDIT_GATE)
+        self.assertEqual(seen["max_rounds"], jev_audit.AUDIT_MAX_ROUNDS)
+        self.assertEqual(seen["need_floor"], jev_audit.AUDIT_NEED_FLOOR)
+
+
 if __name__ == "__main__":
     unittest.main()

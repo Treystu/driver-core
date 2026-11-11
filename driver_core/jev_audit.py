@@ -72,6 +72,24 @@ from .jev_context import (
 #: is worth knowing and not worth holding an answer open for.
 DIMENSION_NEEDING_CONTEXT = "dimension_needing_most_context"
 
+#: The grounded-context loop's configuration for an audit run.
+#:
+#: These are deliberately **not** the library defaults of
+#: :func:`~driver_core.jev_context.ask_until_grounded` (``gate=0.99``,
+#: ``max_rounds=24``). An audit asks once per symbol across a whole package
+#: inside a fifty-cent budget, so it trades loop depth for coverage: three
+#: rounds is what a per-symbol spend can afford, and a 0.90 gate accepts an
+#: answer the model is merely two-thirds sure of rather than paying for a
+#: fourth round it cannot afford.
+#:
+#: Named rather than inlined because the two sets of numbers were the same
+#: shape but not the same values, so a reader of either call site could not
+#: tell which configuration was in force. A default that silently differs
+#: from the function it forwards to is a decision nobody made on purpose.
+AUDIT_GATE = 0.9
+AUDIT_NEED_FLOOR = 3.0
+AUDIT_MAX_ROUNDS = 3
+
 _NOUL = "noul"
 _CHOICE = "choice"
 
@@ -705,8 +723,9 @@ def _top_driver(drivers):
         return None
 
 
-def audit_symbol(symbol, all_symbols, texts, *, settings, gate=0.9,
-                 need_floor=3.0, max_rounds=3, transport_module=None):
+def audit_symbol(symbol, all_symbols, texts, *, settings, gate=AUDIT_GATE,
+                 need_floor=AUDIT_NEED_FLOOR, max_rounds=AUDIT_MAX_ROUNDS,
+                 transport_module=None):
     """Push one symbol through every dimension, with the context protocol.
 
     Returns plain data -- the symbol, its dossier, the grounding, and one
@@ -771,8 +790,9 @@ def audit_symbol(symbol, all_symbols, texts, *, settings, gate=0.9,
     return record
 
 
-def audit(root, *, settings, tests_root=None, gate=0.9, need_floor=3.0,
-          max_rounds=3, budget_usd=0.50, limit=None, modules=None,
+def audit(root, *, settings, tests_root=None, gate=AUDIT_GATE,
+          need_floor=AUDIT_NEED_FLOOR, max_rounds=AUDIT_MAX_ROUNDS,
+          budget_usd=0.50, limit=None, modules=None,
           checkpoint=None, progress=None, transport_module=None, done=()):
     """Audit every symbol in ``root``, one call each, inside a budget.
 
