@@ -32,14 +32,19 @@ class ConsentError(DriverError):
 class BudgetRefused(DriverError):
     """A pre-flight ceiling refused the call. No spend occurred."""
 
-    def __init__(self, estimated, ceiling, label=""):
+    def __init__(self, estimated, ceiling, label="", *, limit="ceiling"):
+        # ``limit`` names the quantity that was actually tested. Both ceilings
+        # and the remaining balance refuse through this type, and printing a
+        # remaining balance as a "ceiling" produced refusals that said a
+        # number exceeded itself (0.01 against 0.01 at 6 dp).
         detail = f"{label} " if label else ""
         super().__init__(
             f"{detail}refused before dispatch: estimated ${estimated:.6f} "
-            f"exceeds ceiling ${ceiling:.6f}"
+            f"exceeds {limit} ${ceiling:.6f}"
         )
         self.estimated = estimated
         self.ceiling = ceiling
+        self.limit = limit
 
 
 class PerceptionUnavailable(DriverError):
