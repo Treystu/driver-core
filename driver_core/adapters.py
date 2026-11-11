@@ -42,6 +42,17 @@ from .parsing import _last_reply, _tool_payload, read_document
 _ARGV_ECHO = 6
 
 
+def _truncation_failure(what, result):
+    """Name a capture the cap cut short, with the sizes that prove it.
+
+    ``osal.run`` already reports both numbers in ``error``; this prefixes
+    which program produced them so the diagnosis names the tier, without
+    repeating the phrase ``error`` already carries.
+    """
+    reason = (result.error or "").split("output truncated: ", 1)[-1]
+    return f"{what} output truncated: {reason}"
+
+
 def _launch_failure(prefix, result, argv):
     """Say what was actually attempted, not just that it was not found.
 
@@ -193,6 +204,14 @@ class CliSource:
         if self.extra_env:
             kwargs["env"] = self.extra_env
         result = osal.run(argv, **kwargs)
+        if result.truncated:
+            # A prefix of the answer is not the answer. The capture cap is a
+            # failure to ask in full, so it takes the same route as a
+            # timeout -- unless it is named here, the stored payload is
+            # indistinguishable from a command that really printed exactly
+            # the cap, down to the fingerprint two steps compare.
+            return Capture(self.name, target, None,
+                           detail=_truncation_failure("command", result))
         if not result.ok and result.reason:
             # "not found" and "timed out" are failures to ask, not answers.
             return Capture(self.name, target, None,
@@ -273,6 +292,12 @@ class McpSource:
         if self.extra_env:
             kwargs["env"] = self.extra_env
         result = osal.run(self.command, **kwargs)
+        if result.truncated:
+            # The reply that matters is the one the cap removed. Reporting
+            # that as "no structured content" sends the operator after an
+            # empty tool instead of a truncated capture.
+            return Capture(self.name, target, None,
+                           detail=_truncation_failure("mcp server", result))
         if not result.ok and result.reason:
             return Capture(self.name, target, None,
                            detail=_launch_failure("mcp server did not run",
