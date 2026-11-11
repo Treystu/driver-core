@@ -97,12 +97,55 @@ class KeyTests(unittest.TestCase):
         class Unkeyed:
             keyed = False
             jev_api_key = ""
-            jev_endpoint = "https://example.invalid"
 
         state = pass_e.build_state(head="abc1234", checks=[])
         with self.assertRaises(SystemExit) as ctx:
             pass_e.ask(state, Unkeyed())
         self.assertIn("no Jev key configured", str(ctx.exception))
+
+    def test_asking_uses_the_service_url_rather_than_reading_it_off_settings(self):
+        # The first keyed run died on ``settings.jev_endpoint``: Settings owns
+        # no such attribute, and only a keyed run reaches the line. A fake
+        # settings object with just the two attributes the tool needs pins it.
+        class Keyed:
+            keyed = True
+            jev_api_key = "test-key"
+            jev_model = "jev-test"
+
+        class FakeResponse:
+            ok = True
+            payload = {
+                "answers": {"correctness": {"type": "noul", "noul": 0.9},
+                            "completeness": {"type": "noul", "noul": 0.8},
+                            "honesty": {"type": "noul", "noul": 0.95}},
+                "model": "jev-test",
+                "is_fallback": False,
+            }
+
+        seen = {}
+
+        def fake_call(url, questions, **kwargs):
+            seen["url"] = url
+            seen["questions"] = questions
+            seen["body_extra"] = kwargs.get("body_extra")
+            return FakeResponse()
+
+        original = pass_e.transport.call_service
+        pass_e.transport.call_service = fake_call
+        try:
+            result = pass_e.ask(pass_e.build_state(head="abc1234", checks=[]),
+                                Keyed())
+        finally:
+            pass_e.transport.call_service = original
+
+        self.assertEqual(seen["url"], pass_e.SYSTEM_ONE_URL)
+        self.assertEqual(set(seen["questions"]), set(pass_e.AXES))
+        # The service answers 422 without a model, and the state is what the
+        # questions are about: both must travel.
+        self.assertEqual(seen["body_extra"]["model"], "jev-test")
+        self.assertIn("state", seen["body_extra"])
+        self.assertAlmostEqual(result["readings"]["correctness"], 0.9)
+        self.assertEqual(result["model"], "jev-test")
 
 
 if __name__ == "__main__":
