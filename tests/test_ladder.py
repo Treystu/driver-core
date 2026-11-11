@@ -13,10 +13,12 @@ missing or malformed answer, and it gates acting, never observing.
 
 **Every declared threshold clears the observed jitter band.** §5b measured
 Jev's confidence jittering across 0.63–0.67 on identical input -- a band
-0.04 wide. The default threshold (0.70) clears that band by 0.03, less than
-the band's own width, which is the failure mode. Every rung of the declared
-ladder clears the band by at least its width, and the tests say so
-numerically rather than by looking at the values.
+0.04 wide. Every rung of the declared ladder clears the band by at least its
+width, and so does the single global threshold a default run uses: it is
+derived from the band's top plus that width (0.71) rather than written down,
+because written down it was 0.70 -- a 0.03 clearance, less than the width,
+which is the failure mode. The tests say so numerically rather than by
+looking at the values.
 
 Hermetic: no network, no model, no screen. The driver-level cases use the
 same doubles the pipeline tests use.
@@ -729,6 +731,35 @@ def _pool():
 
 def _source():
     return StructuredSource("cli", lambda target: dict(_state()))
+
+
+class DefaultFloorClearsTheJitterBandTests(unittest.TestCase):
+    """The one threshold a default run uses obeys the rule the rungs obey."""
+
+    def test_the_global_floor_clears_the_band_by_the_ladders_own_width(self):
+        clearance = DEFAULT_CONFIDENCE_THRESHOLD - CONFIDENCE_JITTER_BAND[1]
+        self.assertGreaterEqual(clearance, JITTER_BAND_WIDTH - 1e-12)
+
+    def test_the_floor_is_derived_from_the_band_not_written_down(self):
+        self.assertEqual(
+            DEFAULT_CONFIDENCE_THRESHOLD,
+            round(CONFIDENCE_JITTER_BAND[1] + JITTER_BAND_WIDTH, 2))
+
+    def test_the_global_floor_passes_the_rule_the_rungs_must_pass(self):
+        """One rule for both: a value clears the band by at least its width.
+
+        ``0.70`` sat 0.03 above the band top and failed it; ``0.55`` sits
+        0.08 below the band's floor and passes it. The point is that the
+        number every default run uses is held to the same test as the rungs.
+        """
+        from driver_core.config import _clears_jitter_band
+
+        self.assertTrue(_clears_jitter_band(DEFAULT_CONFIDENCE_THRESHOLD))
+        self.assertFalse(_clears_jitter_band(0.70))
+        for name, rung in CONFIDENCE_LADDER.items():
+            with self.subTest(rung=name):
+                self.assertTrue(_clears_jitter_band(rung.act))
+                self.assertTrue(_clears_jitter_band(rung.confirm))
 
 
 if __name__ == "__main__":

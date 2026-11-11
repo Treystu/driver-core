@@ -56,11 +56,6 @@ DEFAULT_RUN_CEILING_USD = 5.00
 #: here, so a rate error scales what they admit.
 JEV_INPUT_PRICE_PER_MILLION = 0.042
 
-#: Confidence above which a decision is acted on. Jev's calibrated
-#: confidence is the signal; this is the threshold; code owns both the
-#: comparison and the vocabulary it is comparing within.
-DEFAULT_CONFIDENCE_THRESHOLD = 0.70
-
 #: The confidence band Jev's answers jittered across in the operator-verified
 #: probe of the canon addendum (§5b owns the measurement). A threshold within
 #: one width of the band is decided by sampling noise rather than by the
@@ -71,6 +66,21 @@ CONFIDENCE_JITTER_BAND = (0.63, 0.67)
 #: was a clearance smaller than this. :func:`validated_ladder` enforces it
 #: on every rung, so the failure is refused at construction.
 JITTER_BAND_WIDTH = 0.04
+
+#: Confidence above which a decision is acted on. Jev's calibrated
+#: confidence is the signal; this is the threshold; code owns both the
+#: comparison and the vocabulary it is comparing within.
+#:
+#: Derived from the jitter band rather than written down, because the two
+#: disagreed: every rung had to clear the band by its width, while the single
+#: threshold every default run actually uses was written as 0.70 -- 0.03 above
+#: the band's top, less than the 0.04 the rungs must hold. A threshold inside
+#: one width of the band is decided by sampling noise as much as by the state,
+#: so the rule that was enforced on the ladder is now enforced on the number
+#: that decides. This is the same arithmetic the ladder is validated by, read
+#: from the same two constants, so the two cannot drift apart again.
+DEFAULT_CONFIDENCE_THRESHOLD = round(CONFIDENCE_JITTER_BAND[1]
+                                     + JITTER_BAND_WIDTH, 2)
 
 #: Slack for the ladder comparisons. Rungs are declared in hundredths and
 #: binary floats do not land exactly on them (0.71 - 0.67 is
