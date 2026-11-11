@@ -351,6 +351,66 @@ class OsalInputTests(unittest.TestCase):
         self.assertIn("no host", str(ctx.exception))
 
 
+class TruncatedCaptureTests(unittest.TestCase):
+    """A capture the cap cut short is a failure to ask, not an answer.
+
+    ``osal.run`` carries ``truncated`` and the produced byte count (#41); the
+    adapters ignored both, so a 5 MB command was stored as a 1 MiB payload
+    whose fingerprint was byte-identical to a genuine 1 MiB answer.
+    """
+
+    def _cli(self, script, **kwargs):
+        from driver_core.adapters import CliSource
+        return CliSource([sys.executable, "-c", script], **kwargs)
+
+    def test_an_over_cap_command_is_refused_with_both_sizes(self):
+        from driver_core.observation import Target
+        capture = self._cli("import sys; sys.stdout.write('y'*5_000_000)").capture(
+            Target("probe", "cli"))
+        self.assertIsNone(capture.payload)
+        self.assertIn("truncated", capture.detail)
+        self.assertIn("5000000", capture.detail)
+        self.assertEqual(capture.fingerprint, "")
+
+    def test_an_under_cap_command_is_unchanged(self):
+        from driver_core.observation import Target
+        capture = self._cli("print('hello')").capture(Target("probe", "cli"))
+        self.assertEqual(capture.payload["stdout"].strip(), "hello")
+        self.assertEqual(capture.detail, "")
+        self.assertNotEqual(capture.fingerprint, "")
+
+    def test_a_timeout_is_still_a_timeout(self):
+        from driver_core.observation import Target
+        capture = self._cli("import time; time.sleep(20)", timeout=2).capture(
+            Target("probe", "cli"))
+        self.assertIsNone(capture.payload)
+        self.assertIn("timed out", capture.detail)
+
+    def _mcp(self, script):
+        from driver_core.adapters import McpSource
+        return McpSource([sys.executable, "-c", script], tool="read")
+
+    def test_an_over_cap_mcp_reply_names_truncation(self):
+        from driver_core.observation import Target
+        script = ("import sys, json; "
+                  "sys.stdout.write('x'*1_200_000 + chr(10)); "
+                  "sys.stdout.write(json.dumps({'jsonrpc':'2.0','id':2,"
+                  "'result':{'structuredContent':{'answer':'ok'}}}) + chr(10))")
+        capture = self._mcp(script).capture(Target("probe", "mcp"))
+        self.assertIsNone(capture.payload)
+        self.assertIn("truncated", capture.detail)
+        self.assertNotIn("no structured content", capture.detail)
+
+    def test_a_normal_mcp_reply_still_parses(self):
+        from driver_core.observation import Target
+        script = ("import sys, json; "
+                  "sys.stdout.write(json.dumps({'jsonrpc':'2.0','id':2,"
+                  "'result':{'structuredContent':{'answer':'ok'}}}) + chr(10))")
+        capture = self._mcp(script).capture(Target("probe", "mcp"))
+        self.assertEqual(capture.payload, {"answer": "ok"})
+        self.assertEqual(capture.detail, "")
+
+
 class CaptureCapTests(unittest.TestCase):
     """The capture cap must both bound memory and say when it bit.
 
