@@ -14,6 +14,7 @@ the shape of a ``for`` loop.
 """
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 
@@ -348,6 +349,69 @@ class OsalInputTests(unittest.TestCase):
         with self.assertRaises(Exception) as ctx:
             osal.http_get("http:///no-host")
         self.assertIn("no host", str(ctx.exception))
+
+
+class CaptureCapTests(unittest.TestCase):
+    """The capture cap must both bound memory and say when it bit.
+
+    ``MAX_CAPTURE_BYTES`` claims a command that prints without bound cannot
+    exhaust the driver's memory. Buffering the whole output and slicing it
+    afterwards delivered neither half: 20 MB of child output peaked at 21.9 MB
+    in the parent at a 1024-byte cap, and the caller could not tell the
+    prefix it received from a complete answer.
+    """
+
+    CAP = 1024
+
+    def test_output_under_the_cap_is_not_marked_truncated(self):
+        result = osal.run([sys.executable, "-c", "print('small')"],
+                          max_bytes=self.CAP)
+        self.assertTrue(result.ok)
+        self.assertFalse(result.truncated)
+        self.assertEqual(result.stdout.strip(), "small")
+        self.assertEqual(result.error, "")
+
+    def test_output_over_the_cap_is_marked_and_counted(self):
+        produced = 20_000_000
+        result = osal.run(
+            [sys.executable, "-c",
+             f"import sys; sys.stdout.write('y'*{produced})"],
+            max_bytes=self.CAP)
+        self.assertEqual(len(result.stdout), self.CAP)
+        self.assertTrue(result.truncated)
+        self.assertEqual(result.captured_bytes, produced)
+        self.assertIn(str(produced), result.error)
+        self.assertIn(str(self.CAP), result.error)
+        self.assertTrue(result.to_dict()["truncated"])
+
+    def test_the_cap_bounds_the_parent_memory(self):
+        import tracemalloc
+        tracemalloc.start()
+        try:
+            osal.run([sys.executable, "-c",
+                      "import sys; sys.stdout.write('y'*5_000_000)"],
+                     max_bytes=self.CAP)
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        # Buffering the child's output would put the peak near 5 MB.
+        self.assertLess(peak, 2_000_000, f"peak {peak} bytes at a {self.CAP} cap")
+
+    def test_a_finished_child_with_input_text_is_unaffected(self):
+        result = osal.run(
+            [sys.executable, "-c",
+             "import sys; sys.stdin.read(); sys.stdout.write('got')"],
+            input_text="hi")
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(result.stdout, "got")
+        self.assertFalse(result.truncated)
+
+    def test_a_timeout_is_still_a_named_refusal(self):
+        result = osal.run([sys.executable, "-c", "import time; time.sleep(10)"],
+                          timeout=1)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "timeout")
+        self.assertIn("timed out after 1s", result.error)
 
 
 class NetworkFetchTests(unittest.TestCase):

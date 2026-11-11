@@ -90,6 +90,21 @@ def platform_name():
     return f"unknown:{sys.platform}"
 
 
+def _read_capped(handle, max_bytes):
+    """Read at most ``max_bytes`` from ``handle``; report the full size.
+
+    Returns ``(text, produced_bytes)``. ``produced_bytes`` is the size the
+    child actually wrote, so a caller can see that it was given a prefix;
+    it is ``None`` when the size cannot be established.
+    """
+    handle.flush()
+    handle.seek(0, os.SEEK_END)
+    produced = handle.tell()
+    handle.seek(0)
+    kept = handle.read(max_bytes)
+    return kept.decode("utf-8", "replace"), produced
+
+
 def run(argv, *, cwd=None, timeout=DEFAULT_TIMEOUT, env=None, input_text=None,
         max_bytes=MAX_CAPTURE_BYTES):
     """Run one command as an argv list, with no shell.
@@ -135,44 +150,72 @@ def run(argv, *, cwd=None, timeout=DEFAULT_TIMEOUT, env=None, input_text=None,
     if platform_name() == "windows":
         popen_kwargs["creationflags"] = CREATE_NO_WINDOW
 
-    try:
-        completed = subprocess.run(
-            argv, input=(input_text.encode("utf-8") if input_text is not None
-                         else None),
-            timeout=timeout, env=child_env, check=False, **popen_kwargs)
-    except FileNotFoundError:
-        return ProcessResult(0, False, "", "", f"not found: {argv[0]}",
-                             reason="not_found")
-    except subprocess.TimeoutExpired:
-        return ProcessResult(0, False, "", "",
-                             f"timed out after {timeout}s", reason="timeout")
-    except OSError as exc:
-        return ProcessResult(0, False, "", "", f"failed to start: {exc}",
-                             reason="os_error")
+    # Spool both pipes to disk instead of buffering them in memory. Reading
+    # through ``PIPE`` meant ``communicate()`` held the child's *entire*
+    # output before the cap was ever consulted, so a command that printed
+    # without bound exhausted the driver's memory at a 1 MiB cap -- the exact
+    # failure ``MAX_CAPTURE_BYTES`` says it prevents.
+    with tempfile.TemporaryFile() as out_file, \
+            tempfile.TemporaryFile() as err_file:
+        popen_kwargs["stdout"] = out_file
+        popen_kwargs["stderr"] = err_file
+        try:
+            completed = subprocess.run(
+                argv, input=(input_text.encode("utf-8")
+                             if input_text is not None else None),
+                timeout=timeout, env=child_env, check=False, **popen_kwargs)
+        except FileNotFoundError:
+            return ProcessResult(0, False, "", "", f"not found: {argv[0]}",
+                                 reason="not_found")
+        except subprocess.TimeoutExpired:
+            return ProcessResult(0, False, "", "",
+                                 f"timed out after {timeout}s",
+                                 reason="timeout")
+        except OSError as exc:
+            return ProcessResult(0, False, "", "", f"failed to start: {exc}",
+                                 reason="os_error")
 
-    stdout = (completed.stdout or b"")[:max_bytes].decode("utf-8", "replace")
-    stderr = (completed.stderr or b"")[:max_bytes].decode("utf-8", "replace")
+        stdout, produced = _read_capped(out_file, max_bytes)
+        stderr, _ = _read_capped(err_file, max_bytes)
+
+    truncated = produced is not None and produced > max_bytes
+    detail = ""
+    if truncated:
+        detail = (f"output truncated: {produced} bytes produced, "
+                  f"{max_bytes} kept")
     return ProcessResult(completed.returncode, completed.returncode == 0,
-                         stdout, stderr, "")
+                         stdout, stderr, detail,
+                         truncated=truncated, captured_bytes=produced)
 
 
 class ProcessResult:
     """One child process's outcome."""
 
-    __slots__ = ("returncode", "ok", "stdout", "stderr", "error", "reason")
+    __slots__ = ("returncode", "ok", "stdout", "stderr", "error", "reason",
+                 "truncated", "captured_bytes")
 
-    def __init__(self, returncode, ok, stdout, stderr, error, reason=""):
+    def __init__(self, returncode, ok, stdout, stderr, error, reason="",
+                 truncated=False, captured_bytes=None):
         self.returncode = returncode
         self.ok = ok
         self.stdout = stdout
         self.stderr = stderr
         self.error = error
         self.reason = reason
+        #: True when the child produced more than the capture cap allowed.
+        #: Carried rather than inferred: a caller handed a prefix cannot tell
+        #: it from a complete answer, which is the failure this module exists
+        #: to prevent (see ``http_get`` for the same rule on the wire).
+        self.truncated = truncated
+        #: How many bytes the child actually produced, when it is known.
+        self.captured_bytes = captured_bytes
 
     def to_dict(self):
         return {"returncode": self.returncode, "ok": self.ok,
                 "stdout": self.stdout, "stderr": self.stderr,
-                "error": self.error, "reason": self.reason}
+                "error": self.error, "reason": self.reason,
+                "truncated": self.truncated,
+                "captured_bytes": self.captured_bytes}
 
     def __repr__(self):
         return f"ProcessResult(rc={self.returncode}, ok={self.ok})"
