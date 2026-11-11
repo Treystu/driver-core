@@ -324,7 +324,10 @@ def main(argv=None):
                  for check in checks
                  if check["command"].startswith("git rev-parse")), "")
 
-    limits = list(args.limit or ())
+    # Stand on the defaults rather than replace them: passing any --limit used
+    # to swap the standing limits out, which would have re-opened the hole
+    # this cure closes the moment a caller declared one limit of its own.
+    limits = list(DEFAULT_LIMITS) + list(args.limit or ())
     if args.no_call:
         limits.append("readings not taken: --no-call")
 

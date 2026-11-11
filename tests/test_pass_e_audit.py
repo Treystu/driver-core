@@ -159,6 +159,36 @@ class StateTests(unittest.TestCase):
         int(digest, 16)
 
 
+class MainLimitTests(unittest.TestCase):
+    def test_a_no_call_collection_still_carries_the_standing_limits(self):
+        # The first cut of the #62 cure let any explicit --limit (including
+        # the automatic --no-call note) replace DEFAULT_LIMITS, so a no-call
+        # state carried only the note and read as unqualified evidence.
+        import contextlib
+        import io
+        import json
+        import tempfile
+
+        original = pass_e.collect
+        pass_e.collect = lambda root, interpreters, timeout=1800: [
+            {"command": "git rev-parse --short HEAD", "returncode": 0,
+             "tail": "abc1234", "purpose": "head", "interpreter": None}]
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                out = pathlib.Path(folder) / "state.json"
+                with contextlib.redirect_stdout(io.StringIO()):
+                    code = pass_e.main(["--no-call", "--json-out", str(out)])
+                state = json.loads(out.read_text(encoding="utf-8"))["state"]
+        finally:
+            pass_e.collect = original
+
+        self.assertEqual(code, 0)
+        joined = " ".join(state["declared_limits"])
+        self.assertIn("no CI has ever run", joined)
+        self.assertIn("one surface only", joined)
+        self.assertIn("--no-call", joined)
+
+
 class CollectTests(unittest.TestCase):
     def setUp(self):
         self.seen = []
