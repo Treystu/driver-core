@@ -186,6 +186,24 @@ class EmptyAnswerTests(unittest.TestCase):
         self.assertEqual(capture.source, DOM)
         self.assertEqual(seen, [CLI, DOM])
 
+    def test_a_mapping_of_blank_values_is_a_decline(self):
+        # The same hole one level down: a non-empty mapping that observes
+        # nothing is not state.
+        source = StructuredSource(
+            DOM, lambda target: {"window_title": "", "visible_text": "  "})
+        capture = source.capture(Target("app", DOM))
+        self.assertIsNone(capture.payload)
+        self.assertIn("no state", capture.detail)
+
+    def test_a_falsy_scalar_is_still_state(self):
+        # An exit code of 0 is the observation that matters most here.
+        source = StructuredSource(CLI, lambda target: {"exit_code": 0})
+        self.assertTrue(source.capture(Target("app", CLI)).ok)
+
+    def test_a_nested_blank_structure_is_a_decline(self):
+        source = StructuredSource(MCP, lambda target: {"result": {"rows": []}})
+        self.assertIsNone(source.capture(Target("app", MCP)).payload)
+
     def test_an_empty_dom_capture_is_named_in_the_refusal(self):
         with self.assertRaises(PerceptionUnavailable) as ctx:
             select_capture(Target("app", DOM),
