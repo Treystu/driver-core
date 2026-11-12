@@ -193,8 +193,15 @@ def carries_state(payload):
         return bool(payload.strip())
     if isinstance(payload, (bytes, bytearray)):
         return bool(bytes(payload).strip())
-    if isinstance(payload, (Mapping, Sequence, Set)):
-        return len(payload) > 0
+    # A container carries state only if some member does. Counting a mapping
+    # by its length was the same hole one level down: {"window_title": "",
+    # "visible_text": ""} is a non-empty mapping that observes nothing. A
+    # scalar member is taken at its word, so 0 and False still count -- an
+    # exit code of 0 is state even though it is falsy.
+    if isinstance(payload, Mapping):
+        return any(carries_state(value) for value in payload.values())
+    if isinstance(payload, (Sequence, Set)):
+        return any(carries_state(value) for value in payload)
     return True
 
 
