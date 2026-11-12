@@ -186,6 +186,24 @@ class EmptyAnswerTests(unittest.TestCase):
         self.assertEqual(capture.source, DOM)
         self.assertEqual(seen, [CLI, DOM])
 
+    def test_a_mapping_of_blank_values_is_a_decline(self):
+        # The same hole one level down: a non-empty mapping that observes
+        # nothing is not state.
+        source = StructuredSource(
+            DOM, lambda target: {"window_title": "", "visible_text": "  "})
+        capture = source.capture(Target("app", DOM))
+        self.assertIsNone(capture.payload)
+        self.assertIn("no state", capture.detail)
+
+    def test_a_falsy_scalar_is_still_state(self):
+        # An exit code of 0 is the observation that matters most here.
+        source = StructuredSource(CLI, lambda target: {"exit_code": 0})
+        self.assertTrue(source.capture(Target("app", CLI)).ok)
+
+    def test_a_nested_blank_structure_is_a_decline(self):
+        source = StructuredSource(MCP, lambda target: {"result": {"rows": []}})
+        self.assertIsNone(source.capture(Target("app", MCP)).payload)
+
     def test_an_empty_dom_capture_is_named_in_the_refusal(self):
         with self.assertRaises(PerceptionUnavailable) as ctx:
             select_capture(Target("app", DOM),
@@ -396,6 +414,42 @@ class PoolSelectionTests(unittest.TestCase):
             budget=Budget(1.0, step_ceiling_usd=1.0), audit=MemoryAuditLog())
         self.assertEqual(extractor.serves, (GUI,))
         self.assertFalse(extractor.deterministic)
+
+
+class CaptureLatencyTests(unittest.TestCase):
+    """A capture record carries how long the capture took (#21).
+
+    The tier audit's objective is a success rate, a mean latency and a
+    billed-screen rate over step traces. The record carried the source and the
+    outcome but no duration, so mean capture latency - a third of the
+    comparison - could not be computed from the log at all.
+    """
+
+    def test_the_capture_record_carries_elapsed_ms(self):
+        from driver_core.audit import MemoryAuditLog
+        from driver_core.budget import Budget
+        from driver_core.config import load_settings
+        from driver_core.driver import Driver
+        from driver_core.ev import FakeJev, action_answer
+        from driver_core.extractors import ExtractorPool
+
+        audit = MemoryAuditLog()
+        settings = load_settings(env={}, quorum=2, min_agreement=1.0,
+                                 confidence_threshold=0.7,
+                                 run_ceiling_usd=1.0, step_ceiling_usd=1.0,
+                                 dry_run=True)
+        driver = Driver(settings=settings,
+                        budget=Budget(1.0, step_ceiling_usd=1.0), audit=audit,
+                        pool=ExtractorPool([]),
+                        sources=[_source(CLI, {"exit_code": 0})],
+                        jev=FakeJev(action_answer("observe", confidence=0.99)))
+        driver.step("app")
+        records = [record for record in audit.read_all()
+                   if record["kind"] == "capture"]
+        self.assertEqual(len(records), 1)
+        self.assertIsInstance(records[0]["elapsed_ms"], int)
+        self.assertGreaterEqual(records[0]["elapsed_ms"], 0)
+        self.assertEqual(records[0]["source"], CLI)
 
 
 class DriverPoolSelectionTests(unittest.TestCase):

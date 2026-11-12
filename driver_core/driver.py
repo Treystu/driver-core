@@ -38,6 +38,7 @@ A blocked step is a **normal, successful outcome**. ``StepResult.ok`` is
 false and the result explains why; that is the system working, not failing,
 and the audit log records it as a first-class event.
 """
+import time
 import uuid
 
 from . import policy
@@ -227,11 +228,20 @@ class Driver:
         """
 
         # 1. capture
+        # Timed because the tier audit's objective is a *rate* and a
+        # *latency* over traces, and a record without a duration cannot
+        # answer half of it: the champion's own mean capture latency was
+        # unmeasurable from the log that was supposed to support the
+        # comparison. Monotonic, so a clock adjustment cannot make a capture
+        # look faster or slower than it was.
+        started = time.monotonic()
         try:
             capture = self._capture(target, prefer)
         except PerceptionUnavailable as exc:
             return self._stop(step_id, "capture", "no_capture", str(exc))
-        self.audit.append(KIND_CAPTURE, step_id=step_id, **capture.summary())
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        self.audit.append(KIND_CAPTURE, step_id=step_id,
+                          elapsed_ms=elapsed_ms, **capture.summary())
 
         # 2 + 3. extract and tally
         pool = self._pool_for(capture)
