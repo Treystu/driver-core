@@ -237,6 +237,7 @@ observation.
 | **Every step is auditable** | hash-chained log; `verify` re-hashes the chain and says so out loud. The log is a required argument on everything that acts, and an executor handed to a driver must write to that driver's own chain — an unrecorded or unlinked action is a `TypeError`, not a default |
 | **The log's vocabulary has one owner** | only `audit` declares a `KIND_*`; a whole-package AST scan fails the build if any module writes a record kind as a string, or a name is declared that nothing produces |
 | **Existing logs keep verifying** | `tests/test_audit_compat.py` re-hashes a recorded chain and compares a full run byte for byte |
+| **The chain stays byte-identical, and capture latency is still measured** | a duration cannot be reproducible, so it never enters the chain; it is written to an unchained `trace.jsonl` beside the audit log (`step_id`, `source`, `ok`, `elapsed_ms`), one record per capture attempt, failures included |
 | **OS contact lives in one module** | an AST scan fails the build if anything else imports `subprocess` or probes `os.name`/`sys.platform` |
 | **One concern per module in the perception tier** | `chain` (order, refusals), `adapters` (one way to read a system), `parsing` (JSON-RPC, HTML), `observation` (the vocabulary); an import-graph scan fails the build if an adapter can see the order or a parser learns about a source |
 

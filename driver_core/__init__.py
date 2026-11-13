@@ -7,6 +7,9 @@ the built wheel, the running service and this docstring cannot drift apart.
 What each version changed, one line each; the mechanisms they introduced are
 documented where those mechanisms live.
 
+* ``3.6.0``: capture latency is recorded in an unchained sidecar
+  (``trace.jsonl``) beside the audit log rather than in the chain, whose
+  records stay byte-identical between identical runs (``trace.py``).
 * ``3.4.0``: the audit log's record vocabulary has one owner (``audit.py``'s
   ``KIND_*`` constants); producers import the names. Nothing written changed.
 * ``3.3.0``: a declared command tokenises with no escapes -- whitespace
@@ -30,4 +33,4 @@ ok:false``, and the request body's field set -- has been unchanged since
 2.x, so a host written against an earlier release is unaffected.
 """
 
-__version__ = "3.5.0"
+__version__ = "3.6.0"

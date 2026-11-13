@@ -58,6 +58,7 @@ from .extractors import ExtractorPool
 from .jev_client import JevClient
 from .perception import GUI, select_capture
 from .states import SCREEN_SCHEMA
+from .trace import Stopwatch, TraceLog, beside
 from .wiring import configured_pools, configured_sources
 
 
@@ -119,7 +120,8 @@ class Driver:
 
     def __init__(self, *, audit, settings=None, budget=None,
                  vocabulary=DEFAULT_VOCABULARY, pool=None, jev=None,
-                 executor=None, sources=None, screen=None, pools=None):
+                 executor=None, sources=None, screen=None, pools=None,
+                 trace=None):
         self.settings = settings or load_settings()
         self.budget = budget or Budget(self.settings.run_ceiling_usd,
                                        step_ceiling_usd=self.settings.step_ceiling_usd)
@@ -128,6 +130,16 @@ class Driver:
         #: makes and can see -- :func:`driver_from_settings` is the pairing
         #: the CLI and the service both use.
         self.audit = required(audit, "A Driver")
+        #: The untimed sidecar, and where it goes is derived rather than
+        #: declared twice: it belongs beside the chain
+        #: (:func:`driver_core.trace.beside`), so a driver holding an
+        #: in-memory log gets a pathless sink that writes nothing. Optional
+        #: where the chain is required, and for a reason that is about what
+        #: each file is *for*: the chain is evidence and may never be
+        #: missing, while the sidecar is a measurement that is deliberately
+        #: absent whenever the run kept nothing on disk.
+        self.trace = (trace if trace is not None
+                      else TraceLog(beside(self.audit.path)))
         self.vocabulary = vocabulary
 
         # Each collaborator has exactly one owner. ``None`` means "use what
@@ -227,10 +239,25 @@ class Driver:
         """
 
         # 1. capture
+        #
+        # Timed here and nowhere else: the duration is what #21's metric is
+        # about (how long looking takes), and it is written to the untimed
+        # sidecar rather than into the chain, whose records have to be
+        # byte-identical between two runs of the same input. The stopwatch
+        # covers the whole capture phase, so a tier that declined and a tier
+        # that then answered together cost one number rather than a series
+        # the reader would have to add up.
+        watch = Stopwatch()
         try:
             capture = self._capture(target, prefer)
         except PerceptionUnavailable as exc:
+            # A capture that failed still spent the time. Recording it only on
+            # success would bias the mean towards the tiers that worked.
+            self.trace.append(step_id=step_id, source=None, ok=False,
+                              elapsed_ms=watch.elapsed_ms)
             return self._stop(step_id, "capture", "no_capture", str(exc))
+        self.trace.append(step_id=step_id, source=capture.source,
+                          ok=capture.ok, elapsed_ms=watch.elapsed_ms)
         self.audit.append(KIND_CAPTURE, step_id=step_id, **capture.summary())
 
         # 2 + 3. extract and tally
@@ -511,8 +538,10 @@ def driver_from_settings(settings=None):
     collaborators, the vocabulary -- is what :class:`Driver` takes directly.
     """
     settings = settings or load_settings()
-    return Driver(settings=settings,
-                  audit=AuditLog(settings.audit_path or default_audit_path()))
+    # One path decides two files: the chain at it, the sidecar beside it.
+    path = settings.audit_path or default_audit_path()
+    return Driver(settings=settings, audit=AuditLog(path),
+                  trace=TraceLog(beside(path)))
 
 
 __all__ = ["Driver", "StepResult", "Settings", "load_settings", "Budget",
