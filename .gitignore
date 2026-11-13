@@ -26,3 +26,10 @@ audit.jsonl
 .idea/
 .DS_Store
 Thumbs.db
+
+# Agent/tool working state (installed skills, recovered sessions, cold-run copies).
+# Not source: these are per-seat artifacts and a cold-run copy is a duplicate
+# of the tree, never evidence the repo should carry.
+.agents/
+.freebuff/
+.verify/
