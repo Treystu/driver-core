@@ -58,6 +58,7 @@ from .extractors import ExtractorPool
 from .jev_client import JevClient
 from .perception import GUI, select_capture
 from .states import SCREEN_SCHEMA
+from .trace import CaptureTrace, trace_path_for
 from .wiring import configured_pools, configured_sources
 
 
@@ -119,7 +120,8 @@ class Driver:
 
     def __init__(self, *, audit, settings=None, budget=None,
                  vocabulary=DEFAULT_VOCABULARY, pool=None, jev=None,
-                 executor=None, sources=None, screen=None, pools=None):
+                 executor=None, sources=None, screen=None, pools=None,
+                 trace=None):
         self.settings = settings or load_settings()
         self.budget = budget or Budget(self.settings.run_ceiling_usd,
                                        step_ceiling_usd=self.settings.step_ceiling_usd)
@@ -128,6 +130,18 @@ class Driver:
         #: makes and can see -- :func:`driver_from_settings` is the pairing
         #: the CLI and the service both use.
         self.audit = required(audit, "A Driver")
+        #: Where capture latency goes, or ``None`` for no sidecar.
+        #:
+        #: Deliberately *not* required, unlike the chain: a chain is evidence
+        #: about what the driver saw, decided and did, while this is a
+        #: measurement of how long one tier took. A caller that brought a
+        #: memory log -- a test, a dry run -- has nowhere to put a file and
+        #: wants no stray one, so the absence of a trace is the honest
+        #: default rather than a gap in the record.
+        #:
+        #: :func:`driver_from_settings` is where a real run gets one, derived
+        #: from the audit log's own path (see :mod:`driver_core.trace`).
+        self.trace = trace
         self.vocabulary = vocabulary
 
         # Each collaborator has exactly one owner. ``None`` means "use what
@@ -228,7 +242,7 @@ class Driver:
 
         # 1. capture
         try:
-            capture = self._capture(target, prefer)
+            capture = self._capture(target, prefer, step_id=step_id)
         except PerceptionUnavailable as exc:
             return self._stop(step_id, "capture", "no_capture", str(exc))
         self.audit.append(KIND_CAPTURE, step_id=step_id, **capture.summary())
@@ -400,14 +414,26 @@ class Driver:
         """
         return next((s for s in self.sources if s.name == "screen"), None)
 
-    def _capture(self, target, prefer):
+    def _capture(self, target, prefer, *, step_id=None):
         """One capture, through the ordered tier chain.
 
         ``self.sources`` is the whole chain, screen included, and it is
         filtered by target class rather than consulted in a fixed order --
         that filtering is the guarantee, not this loop.
+
+        Each attempt is handed to this driver's trace, when it has one, with
+        the step already bound. The tier policy is told nothing about steps or
+        files: it reports an attempt, and :mod:`driver_core.trace` decides what
+        one is worth keeping.
+
+        ``step_id`` is optional because this seam is also called directly to
+        inspect a refusal message. A record is tied to its run by ``step_id``
+        and nothing else, so a capture with no step is traced as nothing
+        rather than filed under a null id.
         """
-        return select_capture(target, self.sources, prefer=prefer)
+        trace = (self.trace.recorder(step_id)
+                 if self.trace is not None and step_id is not None else None)
+        return select_capture(target, self.sources, prefer=prefer, trace=trace)
 
     def _pool_for(self, capture):
         """The extractor pool for this capture's target class.
@@ -511,8 +537,16 @@ def driver_from_settings(settings=None):
     collaborators, the vocabulary -- is what :class:`Driver` takes directly.
     """
     settings = settings or load_settings()
+    audit_path = settings.audit_path or default_audit_path()
+    # The sidecar is derived here, beside the chain, so the two cannot name
+    # different runs: one setting decides where a run's records live, and its
+    # measurements live next to them (``audit.jsonl`` ->
+    # ``audit.trace.jsonl``). Passing ``trace=None`` to :class:`Driver` is
+    # what a caller with a memory log wants; the entry points always have a
+    # path, so the CLI and the service always measure.
     return Driver(settings=settings,
-                  audit=AuditLog(settings.audit_path or default_audit_path()))
+                  audit=AuditLog(audit_path),
+                  trace=CaptureTrace(trace_path_for(audit_path)))
 
 
 __all__ = ["Driver", "StepResult", "Settings", "load_settings", "Budget",
