@@ -11,6 +11,13 @@ name = "driver-core"
 # remove the second copy instead, but it makes the build depend on importing
 # the package, and a test catches the drift that actually matters without
 # touching packaging.
+# 3.6.0: capture latency is recorded in a sidecar beside the audit log
+# instead of in the chain (#70). The log cannot carry a duration -- the
+# byte-identical golden in tests/test_audit_compat.py is the stronger claim
+# that the same run writes the same bytes -- so each capture attempt's
+# elapsed_ms goes to `<audit stem>.trace.jsonl`, unchained and tied to the run
+# by step_id. No record written to the log changes, the wire contract is
+# untouched, and a memory-only chain derives no sidecar at all.
 # 3.5.0: the Jev input price is corrected from $0.0042/Mtok to $0.042/Mtok, the
 # rate reconciled from an operator usage export (13,661,429 input tokens billed
 # at $0.5738 implies $0.0420/Mtok exactly). The old constant was a temporary
@@ -50,7 +57,7 @@ name = "driver-core"
 # "what does this wire `schema` mean" is decided in one place instead of
 # separately in the CLI and the service. POST /step is unchanged: same fields,
 # same STOP_REASONS, same StepResult.to_dict().
-version = "3.5.0"
+version = "3.6.0"
 # 3.0.0: the perception tiers are reachable from the product. Sources are
 # registered from declared DRIVER_* settings (DRIVER_CLI_COMMAND,
 # DRIVER_MCP_COMMAND + DRIVER_MCP_TOOL, DRIVER_DOM_URL, DRIVER_SCREEN), and an

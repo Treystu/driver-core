@@ -55,6 +55,8 @@ told "every source declined" and an operator who is told "no source serves
 that class" have different problems and different fixes, and the message is
 the only place that can tell them apart.
 """
+import time
+
 from .errors import PerceptionUnavailable
 from .observation import (
     SCREEN_SOURCE, SOURCE_ORDER, VISION_CLASS,
@@ -62,7 +64,7 @@ from .observation import (
 )
 
 
-def select_capture(target, sources, *, prefer=()):
+def select_capture(target, sources, *, prefer=(), trace=None):
     """Return the first usable capture, structured sources first.
 
     ``prefer`` reorders *within* the structured set only. It cannot promote
@@ -78,10 +80,33 @@ def select_capture(target, sources, *, prefer=()):
     tried* -- and an operator who configured a CLI source and asked for
     pixels has a wiring mistake rather than an observation failure, so the
     message says which of the three happened.
+
+    ``trace`` is an optional observer of every attempt, called as
+    ``trace(source_name, ok, elapsed_ms)`` after each source answers or
+    declines. It is a measurement hook and changes no decision: this module
+    still knows no adapter, no file and no step -- what to do with a duration
+    is :mod:`driver_core.trace`'s business (#70). Passing nothing costs one
+    ``if`` per attempt and leaves the tier policy exactly as it was.
     """
     target = as_target(target)
     candidates = [s for s in sources if s.can_serve(target)]
     excluded = [s.name for s in sources if not s.can_serve(target)]
+
+    def attempt(source):
+        """Capture once, and report how long it took without changing it.
+
+        The timing wraps the call rather than being taken beside it, so a
+        source that spends its time in a subprocess, a socket or a screenshot
+        is measured by what a caller actually waited for. ``capture.ok`` is
+        read after the clock stops: whether a payload arrived is the answer,
+        not part of the wait.
+        """
+        started = time.perf_counter()
+        capture = source.capture(target)
+        if trace is not None:
+            trace(source.name, capture.ok,
+                  (time.perf_counter() - started) * 1000.0)
+        return capture
 
     structured_order = [s for s in SOURCE_ORDER if s != SCREEN_SOURCE]
     structured_order.sort(
@@ -92,7 +117,7 @@ def select_capture(target, sources, *, prefer=()):
         for source in candidates:
             if source.name != name:
                 continue
-            capture = source.capture(target)
+            capture = attempt(source)
             tried.append((source.name, capture.detail or "declined"))
             if capture.ok:
                 return capture
@@ -107,7 +132,7 @@ def select_capture(target, sources, *, prefer=()):
     for source in candidates:
         if source.name in known:
             continue
-        capture = source.capture(target)
+        capture = attempt(source)
         tried.append((source.name, capture.detail or "declined"))
         if capture.ok:
             return capture
@@ -115,7 +140,7 @@ def select_capture(target, sources, *, prefer=()):
     for source in candidates:
         if source.name != SCREEN_SOURCE:
             continue
-        capture = source.capture(target)
+        capture = attempt(source)
         tried.append((source.name, capture.detail or "declined"))
         if capture.ok:
             return capture
