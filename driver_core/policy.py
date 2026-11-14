@@ -21,7 +21,7 @@ The thresholds themselves live in configuration. This module owns the
 comparisons; it does not own the numbers, because the right confidence bar
 for "click a button" is not obviously the right bar for "read a field".
 """
-from .consensus import AGREED, DISAGREED, INSUFFICIENT
+from .consensus import AGREED, DISAGREED, INSUFFICIENT, SLOT_OK
 from .verdicts import PASS, REVIEW, Verdict
 
 # This gate's own refusal. Distinct values, distinct remedies: ``blocked``
@@ -48,10 +48,22 @@ def check_agreement(agreement, *, quorum, min_agreement, min_answering=None):
     evidence than "all three agreed", even when both produce ``agreed``.
     """
     if agreement.outcome == INSUFFICIENT:
+        # The tally carries a per-slot reason for every slot that did not
+        # answer, and this gate used to replace all of it with a count. A
+        # count cannot be acted on: "0 of 2" is the same sentence whether the
+        # capture path is unset, the screen is blank, or an extractor died,
+        # and those have three different remedies. Carry the cause through.
+        # Built from the structured votes rather than from the tally's prose,
+        # so the sentence names each slot's own reason once and does not
+        # repeat the count the sentence already opened with.
+        because = "; ".join(
+            f"slot {vote.slot!r} {vote.status}: {vote.reason}"
+            for vote in agreement.slots if vote.status != SLOT_OK)
         return GateResult(BLOCKED, SHORTFALL,
                           f"{agreement.answering} of {agreement.asked} slots "
                           f"answered; quorum is {quorum}. Retry or fall back "
-                          f"to a structured source.")
+                          f"to a structured source."
+                          + (f" Why: {because}" if because else ""))
     if agreement.outcome == DISAGREED:
         return GateResult(
             BLOCKED, DISAGREEMENT,
@@ -62,10 +74,16 @@ def check_agreement(agreement, *, quorum, min_agreement, min_answering=None):
                           f"unrecognised tally outcome "
                           f"{agreement.outcome!r}")
     if min_answering is not None and agreement.answering < min_answering:
+        # Same rule as the quorum refusal above: a count alone cannot be
+        # acted on, so the slots that did not answer say why they did not.
+        because = "; ".join(
+            f"slot {vote.slot!r} {vote.status}: {vote.reason}"
+            for vote in agreement.slots if vote.status != SLOT_OK)
         return GateResult(
             BLOCKED, SHORTFALL,
             f"only {agreement.answering} extractors answered; this policy "
-            f"requires at least {min_answering} even though they agreed")
+            f"requires at least {min_answering} even though they agreed"
+            + (f" Why: {because}" if because else ""))
     if not agreement.state:
         # Structurally unreachable for an AGREED tally, which is the point:
         # this is a tripwire on an invariant, not a branch.
