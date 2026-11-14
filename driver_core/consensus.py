@@ -98,7 +98,15 @@ def tally_boxes(votes, *, quorum=2, min_agreement=1.0):
                 unanswered=[v.slot for v in votes if v not in answered],
                 cost=sum(v.cost for v in votes))
     if len(answered) < quorum:
-        return Agreement(INSUFFICIENT, **base)
+        # The box tally had the same hole the field tally did: a shortfall
+        # with no reason attached. Every voter that did not answer knows why.
+        because = "; ".join(
+            f"slot {vote.slot!r} {vote.status}: {vote.reason}"
+            for vote in votes if vote not in answered)
+        return Agreement(INSUFFICIENT, detail=(
+            f"{len(answered)} of {len(votes)} slots answered; quorum is "
+            f"{quorum}. This is a shortfall, not agreement."
+            + (f" Why: {because}" if because else "")), **base)
 
     def key(vote):
         state = vote.state
@@ -379,11 +387,20 @@ def tally(votes, schema, *, quorum=2, min_agreement=1.0):
 
     answering = len(answered)
     if answering < quorum:
+        # The per-slot reasons were computed a few lines above and used to be
+        # dropped on the floor here, so a caller was told "0 of 2 slots
+        # answered" and nothing else. That count is the shape of an answer
+        # with the content removed: the operator cannot tell a missing
+        # credential from an empty screen from a crashed extractor, and every
+        # one of those needs a different action. A refusal that has the cause
+        # in hand says it.
+        because = "; ".join(detail) if detail else "no slot reported a reason"
         return Agreement(
             INSUFFICIENT, asked=asked, answering=answering,
             unanswered=unanswered, slots=votes, cost=cost,
             detail=(f"{answering} of {asked} slots answered; quorum is "
-                    f"{quorum}. This is a shortfall, not agreement."))
+                    f"{quorum}. This is a shortfall, not agreement. "
+                    f"Why: {because}"))
 
     fields = []
     for field in schema.fields:
