@@ -130,7 +130,12 @@ def resolve_interpreter(name, *, root=None):
     if root is not None and not pathlib.Path(candidate).is_absolute():
         repo_relative = pathlib.Path(root) / candidate
         if repo_relative.exists():
-            return str(repo_relative.resolve())
+            # Absolute, but NOT resolved: ``venv/bin/python`` is a symlink to
+            # the base installation on most platforms, and following it would
+            # run the base interpreter - discarding the virtualenv's
+            # site-packages and sys.prefix, which is the entire reason the
+            # audit accepts a repo-relative interpreter (Codex, PR #78).
+            return os.path.abspath(repo_relative)
     found = shutil.which(candidate)
     if found is None:
         raise CollectionError(

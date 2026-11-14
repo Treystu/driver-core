@@ -6,6 +6,7 @@ the commands returned, and the same evidence always hashes to the same
 digest while a changed artifact changes it. Nothing here calls a model.
 """
 import importlib.util
+import os
 import pathlib
 import sys
 import tempfile
@@ -55,7 +56,11 @@ class ResolveTests(unittest.TestCase):
             fake.write_text("")
             resolved = pass_e.resolve_interpreter("venv/bin/python",
                                                   root=root)
-            self.assertEqual(pathlib.Path(resolved), fake.resolve())
+            # Compared literally, not via Path.resolve(): resolving would
+            # follow the venv symlink to the base interpreter and silently
+            # drop the virtualenv this path exists to select (Codex, PR #78).
+            self.assertEqual(resolved, os.path.abspath(fake))
+            self.assertTrue(pathlib.Path(resolved).is_absolute())
 
     def test_an_unresolvable_interpreter_is_refused_by_name(self):
         with self.assertRaises(pass_e.CollectionError) as ctx:
