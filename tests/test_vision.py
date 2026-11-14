@@ -24,6 +24,7 @@ import unittest
 
 from driver_core.audit import AuditLog, MemoryAuditLog
 from driver_core.budget import Budget
+from driver_core.errors import BudgetRefused
 from driver_core.config import JEV_INPUT_PRICE_PER_MILLION, load_settings
 from driver_core.consensus import tally
 from driver_core.extractors import (
@@ -201,9 +202,18 @@ class OneClientPathTests(unittest.TestCase):
                                     describer=_describe,
                                     audit=MemoryAuditLog(),
                                     transport_module=service)
-        result = extractor.extract(SCREEN_SCHEMA)
-        self.assertFalse(result.ok)
-        self.assertIn("budget refused", result.reason)
+        # The refusal is RAISED, not returned. A returned reason is
+        # indistinguishable from "the extractor answered badly" once it is a
+        # Vote, so the ceiling's control decision surfaced as an extraction
+        # shortfall and the driver blamed the capture for a spend stop
+        # (Codex, PR #64). The type is the signal the pool keys on.
+        with self.assertRaises(BudgetRefused) as ctx:
+            extractor.extract(SCREEN_SCHEMA)
+        # The type is the signal; the message names the ceiling's own
+        # arithmetic ("refused before dispatch: estimated $... exceeds
+        # ceiling $..."), which is what an operator needs to raise it.
+        self.assertIn("refused before dispatch", str(ctx.exception))
+        self.assertIn("ceiling", str(ctx.exception))
         self.assertEqual(service.requests, [])
 
     def test_one_slot_failing_does_not_silence_the_others(self):

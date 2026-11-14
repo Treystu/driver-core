@@ -8,6 +8,7 @@ digest while a changed artifact changes it. Nothing here calls a model.
 import importlib.util
 import pathlib
 import sys
+import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -35,9 +36,26 @@ class TailTests(unittest.TestCase):
 
 class ResolveTests(unittest.TestCase):
     def test_a_real_interpreter_resolves_to_an_absolute_path(self):
-        resolved = pass_e.resolve_interpreter("python")
+        # Not the bare name "python": an installation that ships only
+        # ``python3`` or a versioned executable made this test raise, which in
+        # turn made an otherwise successful audit report a failed battery
+        # (Codex, PR #61). The running interpreter is the honest control.
+        resolved = pass_e.resolve_interpreter(sys.executable)
         self.assertTrue(pathlib.Path(resolved).is_absolute())
         self.assertTrue(pathlib.Path(resolved).exists())
+
+    def test_a_repository_relative_interpreter_resolves_against_the_root(self):
+        # The bug this pins: run_check() executes the interpreter with
+        # cwd=repo_root, so a repo-relative path is meaningful there and must
+        # not be judged against the caller's cwd.
+        with tempfile.TemporaryDirectory() as root:
+            nested = pathlib.Path(root) / "venv" / "bin"
+            nested.mkdir(parents=True)
+            fake = nested / "python"
+            fake.write_text("")
+            resolved = pass_e.resolve_interpreter("venv/bin/python",
+                                                  root=root)
+            self.assertEqual(pathlib.Path(resolved), fake.resolve())
 
     def test_an_unresolvable_interpreter_is_refused_by_name(self):
         with self.assertRaises(pass_e.CollectionError) as ctx:
@@ -205,7 +223,9 @@ class CollectTests(unittest.TestCase):
             return {"command": " ".join(str(part) for part in command),
                     "returncode": 0, "tail": "ok"}
 
-        def fake_resolve(name):
+        def fake_resolve(name, *, root=None):
+            # ``collect`` resolves relative interpreters against the audited
+            # repository, so the stub mirrors the real signature.
             self.resolved.append(str(name))
             return str(name)
 

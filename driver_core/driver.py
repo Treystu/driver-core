@@ -254,8 +254,13 @@ class Driver:
         # refusal reaches the tally as an error vote and the step reports an
         # extraction shortfall, which blames the capture for a budget decision.
         if pool.refused():
+            # The votes already collected may include billed extractions that
+            # settled before the ceiling refused a later slot. Dropping them
+            # here reported cost_usd 0.0 while the ledger recorded real spend
+            # (Codex, PR #64), so the incurred cost travels with the stop.
             return self._stop(step_id, "extract", "budget_refused",
-                              pool.refused(), capture=capture)
+                              pool.refused(), capture=capture,
+                              cost=sum(vote.cost for vote in votes))
         agreement = tally(votes, schema, quorum=self.settings.quorum,
                           min_agreement=self.settings.min_agreement)
         receipt = agreement.receipt(schema.identity(), step_id)

@@ -159,9 +159,15 @@ class VisionExtractor(LocateRungs):
             """One extraction record from one exchange."""
             if one.stage == "reserve":
                 self.history.invalidate()
-                # Refused before dispatch, so nothing was spent.
-                return self._record(
-                    Extraction(reason=f"budget refused: {one.error}"))
+                # Refused before dispatch, so nothing was spent. This is
+                # RAISED rather than returned as an unsuccessful Extraction:
+                # the pool decides "spend stop" versus "extractor answered
+                # badly" by exception type, as locate_rungs already does, and
+                # a returned reason is indistinguishable from the latter by
+                # the time it is a Vote. Returning it here meant a ceiling
+                # refusal surfaced as an extraction shortfall, blaming the
+                # capture for the ceiling's decision (Codex, PR #64).
+                raise one.error
             if one.error is not None:
                 self.history.invalidate()
                 return self._record(Extraction(
