@@ -19,11 +19,13 @@ will actually run rather than to what they typed -- ``--grant delete_file
 path that would be deleted.
 """
 import argparse
+import dataclasses
 import json
+import os
 import sys
 
 from .actions import DEFAULT_VOCABULARY
-from .config import load_settings
+from .config import ENV_PREFIX, load_settings
 from .driver import driver_from_settings
 from .executor import Consent, normalise_params
 from .perception import Target
@@ -159,6 +161,37 @@ def cmd_verify(args, driver):
     return EXIT_OK if payload["audit"]["ok"] else EXIT_REFUSED
 
 
+def _advertised_settings(settings, host, port, env=None):
+    """The settings the service should publish as its own address.
+
+    ``base_url`` answers "where do I reach this service", and until this
+    existed it came only from ``DRIVER_BASE_URL`` or the built-in default, so
+    a service started with ``--port 8787`` bound 8787 and then told every
+    caller it lived on the default port. The Harness doctor believed it and
+    reported a healthy driver as unreachable.
+
+    The listener is the authority, so the address is derived from the host
+    and port the service was actually asked to use. Two exceptions, both
+    deliberate:
+
+    * An explicit ``DRIVER_BASE_URL`` always wins, even when it disagrees
+      with the bound port. A service behind a proxy, a tunnel or a port
+      forwarder is reached somewhere other than where it binds, and an
+      operator who said so out loud has said something the listener cannot
+      know.
+    * Port ``0`` means "any free port", which is not known until the socket
+      is bound, so nothing is derived here and the announce line stays the
+      authority for that run.
+    """
+    env = os.environ if env is None else env
+    if ENV_PREFIX + "BASE_URL" in env:
+        return settings
+    if not 0 < port < 65536:
+        return settings
+    return dataclasses.replace(
+        settings, base_url=f"http://{host}:{port}", host=host, port=port)
+
+
 def cmd_serve(args, driver):
     if args.print_token:
         # A pure query, binding nothing. It used to bind the port, print, and
@@ -174,6 +207,15 @@ def cmd_serve(args, driver):
             return EXIT_ERROR
         print(declared)
         return EXIT_OK
+    settings = _advertised_settings(
+        driver.settings,
+        args.host if args.host is not None else driver.settings.host,
+        args.port if args.port is not None else driver.settings.port)
+    if settings is not driver.settings:
+        # Rebuilt rather than mutated: Settings is frozen so no downstream
+        # code can change policy behind a caller's back, and that promise is
+        # worth more than the allocation.
+        driver = driver_from_settings(settings)
     serve(args.host, args.port, service=Service(driver), block=True,
           announce=lambda addr: print(
               f"listening on http://{addr[0]}:{addr[1]}"))
