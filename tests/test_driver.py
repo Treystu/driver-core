@@ -16,14 +16,14 @@ from driver_core.audit import MemoryAuditLog
 from driver_core.budget import Budget
 from driver_core.config import load_settings
 from driver_core.driver import Driver, StepResult
-from driver_core.errors import ConsentError
+from driver_core.errors import BudgetRefused, ConsentError
 from driver_core.ev import FakeJev, action_answer
 from driver_core.executor import Consent, Executor
 from driver_core.executor_registry import (
     build_driver_registry, build_read_only_registry,
 )
 from driver_core.extractors import (
-    ExtractorPool, StructuredExtractor,
+    Extraction, ExtractorPool, StructuredExtractor,
 )
 from driver_core.perception import Capture, StructuredSource
 from driver_core.states import SCREEN_SCHEMA
@@ -122,6 +122,53 @@ class HappyPathTests(unittest.TestCase):
                          jev=FakeJev(decision_fn=spy))
         driver.step("target")
         self.assertEqual(seen["window_title"], "report - editor")
+
+
+class BudgetStopCarriesItsSpendTests(unittest.TestCase):
+    """A ceiling refusal must not report zero cost for money already spent.
+
+    Codex, PR #64: when one slot completed a billed extraction and a later
+    slot was refused, the early return dropped the completed votes' costs, so
+    the wire response read ``cost_usd: 0.0`` while the ledger held real spend.
+    """
+
+    def test_a_budget_stop_reports_the_cost_already_incurred(self):
+        class Costly:
+            slot = "a"
+            uses_capture = False
+
+            def extract(self, schema):
+                return Extraction(state=_state(), cost=0.04)
+
+        class Refuses:
+            slot = "b"
+            uses_capture = False
+
+            def extract(self, schema):
+                raise BudgetRefused(0.04, 0.05, "b")
+
+        driver = _driver(pool=ExtractorPool([Costly(), Refuses()]),
+                         sources=[_source()], jev=FakeJev(decision_fn=None))
+        result = driver.step("target")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.stopped_at, "extract")
+        self.assertEqual(result.reason, "budget_refused")
+        self.assertAlmostEqual(result.cost, 0.04)
+
+    def test_the_refusal_reason_names_the_ceiling_not_the_capture(self):
+        class Refuses:
+            slot = "a"
+            uses_capture = False
+
+            def extract(self, schema):
+                raise BudgetRefused(0.04, 0.05, "a")
+
+        driver = _driver(pool=ExtractorPool([Refuses()]),
+                         sources=[_source()], jev=FakeJev(decision_fn=None))
+        result = driver.step("target")
+        self.assertEqual(result.reason, "budget_refused")
+        self.assertIn("ceiling", result.detail)
+        self.assertNotEqual(result.reason, "insufficient_agreement")
 
 
 class ShortfallStopsThePipelineTests(unittest.TestCase):

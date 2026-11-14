@@ -111,7 +111,7 @@ def normalise(text):
     return _ELAPSED.sub("in <elapsed>", (text or "").replace("\r\n", "\n"))
 
 
-def resolve_interpreter(name):
+def resolve_interpreter(name, *, root=None):
     """An absolute path to a real interpreter, or a loud refusal.
 
     Recording "command not found" as a check's result is how a state came to
@@ -121,6 +121,21 @@ def resolve_interpreter(name):
     entry inside it.
     """
     candidate = str(name)
+    # A relative candidate means "relative to the repository being audited",
+    # because that is the working directory ``run_check`` executes it in. It
+    # used to be resolved against the caller's cwd, so launching the audit
+    # from outside the repo (``--root /path/to/repo --interpreter
+    # venv/bin/python``) rejected an interpreter that had always worked
+    # (Codex, PR #61). Repo-relative first, PATH second.
+    if root is not None and not pathlib.Path(candidate).is_absolute():
+        repo_relative = pathlib.Path(root) / candidate
+        if repo_relative.exists():
+            # Absolute, but NOT resolved: ``venv/bin/python`` is a symlink to
+            # the base installation on most platforms, and following it would
+            # run the base interpreter - discarding the virtualenv's
+            # site-packages and sys.prefix, which is the entire reason the
+            # audit accepts a repo-relative interpreter (Codex, PR #78).
+            return os.path.abspath(repo_relative)
     found = shutil.which(candidate)
     if found is None:
         raise CollectionError(
@@ -208,7 +223,7 @@ def collect(repo_root, interpreters, *, timeout=1800):
     root = pathlib.Path(repo_root)
     order = []
     for interpreter in list(interpreters) + [sys.executable]:
-        resolved = resolve_interpreter(interpreter)
+        resolved = resolve_interpreter(interpreter, root=repo_root)
         if resolved not in order:
             order.append(resolved)
     checks = [run_check(["git", "rev-parse", "--short", "HEAD"], cwd=root,
